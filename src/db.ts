@@ -3,14 +3,14 @@ import { PRESET_CATEGORIES } from './categories';
 
 /** Tiny promise wrapper around IndexedDB. Everything lives on this device only. */
 const DB_NAME = 'pantry';
-const STORES = ['items', 'categories', 'shopping', 'events', 'kv'] as const;
+const STORES = ['items', 'categories', 'shopping', 'events', 'kv', 'expiryJobs'] as const;
 type StoreName = typeof STORES[number];
 let dbp: Promise<IDBDatabase> | null = null;
 
 function open(): Promise<IDBDatabase> {
   if (dbp) return dbp;
   dbp = new Promise((res, rej) => {
-    const r = indexedDB.open(DB_NAME, 1);
+    const r = indexedDB.open(DB_NAME, 2);
     r.onupgradeneeded = () => {
       const db = r.result;
       for (const s of STORES) if (!db.objectStoreNames.contains(s)) db.createObjectStore(s, { keyPath: s === 'kv' ? 'key' : 'id' });
@@ -25,9 +25,12 @@ async function store(name: StoreName, mode: IDBTransactionMode = 'readonly') {
   return (await open()).transaction(name, mode).objectStore(name);
 }
 export async function getAll<T>(name: StoreName): Promise<T[]> { return req((await store(name)).getAll()) as Promise<T[]>; }
+export async function get<T>(name: StoreName, id: string): Promise<T | undefined> { return req((await store(name)).get(id)) as Promise<T | undefined>; }
 export async function put<T>(name: StoreName, v: T) { await req((await store(name, 'readwrite')).put(v)); }
 export async function del(name: StoreName, id: string) { await req((await store(name, 'readwrite')).delete(id)); }
 export async function clear(name: StoreName) { await req((await store(name, 'readwrite')).clear()); }
+
+export interface ExpiryJob { id: string; itemId: string; photo: Blob; addedAt: number; attempts: number; }
 
 export const DEFAULT_SETTINGS: Settings = {
   provider: 'gemini', geminiKey: '', geminiModel: 'gemini-3.6-flash',

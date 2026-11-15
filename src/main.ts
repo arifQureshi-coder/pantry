@@ -33,11 +33,11 @@ async function load() {
 // ---------- expiry helpers ----------
 type Fresh = 'fresh' | 'soon' | 'expired' | 'none';
 function freshness(i: Item): Fresh {
-  if (!i.expiry) return 'none';
+  if (!i.expiry || i.expiryStatus === 'reading' || i.expiryStatus === 'failed') return 'none';
   const d = daysUntil(i.expiry);
   return d < 0 ? 'expired' : d <= S.settings.leadDays ? 'soon' : 'fresh';
 }
-function expiryLabel(i: Item) {
+function dateLabel(i: Item) {
   if (!i.expiry) return 'No date';
   const d = daysUntil(i.expiry);
   if (d < 0) return d === -1 ? 'Expired yesterday' : `Expired ${-d}d ago`;
@@ -46,7 +46,15 @@ function expiryLabel(i: Item) {
   if (d <= 30) return `${d} days`;
   return i.expiryMonthOnly ? localDate(i.expiry).toLocaleDateString('en-AU', { month: 'short', year: 'numeric' }) : formatDate(i.expiry);
 }
-const expiringSoon = () => active().filter(i => ['soon', 'expired'].includes(freshness(i))).sort((a, b) => a.expiry!.localeCompare(b.expiry!));
+function expiryLabel(i: Item) {
+  if (i.expiryStatus === 'reading') return 'Reading…';
+  if (i.expiryStatus === 'failed') return "Couldn't read, tap to enter";
+  if (i.expiryStatus === 'pending' && i.expiry) return dateLabel(i) + '?';
+  return dateLabel(i);
+}
+const isFinalDate = (i: Item) => !!i.expiry && !i.expiryStatus;
+const datesToCheck = () => active().filter(i => i.expiryStatus === 'pending' || i.expiryStatus === 'failed').sort((a, b) => (a.expiry ?? '9999').localeCompare(b.expiry ?? '9999'));
+const expiringSoon = () => active().filter(i => isFinalDate(i) && ['soon', 'expired'].includes(freshness(i))).sort((a, b) => a.expiry!.localeCompare(b.expiry!));
 
 // ---------- toast / sheet ----------
 function toast(msg: string) {
@@ -99,6 +107,8 @@ function itemsView() {
         <button data-view="grid" class="${S.view === 'grid' ? 'on' : ''}" aria-label="Category view">▦</button>
       </div>
     </header>
+    ${(() => { const check = datesToCheck(); return check.length ? `<button class="banner check" id="dates-check">
+        <span>📅</span><span><b>${check.length} date${check.length > 1 ? 's' : ''} to check</b><br><small>${esc(check.slice(0, 3).map(i => i.name).join(', '))}${check.length > 3 ? '…' : ''}</small></span><span>›</span></button>` : ''; })()}
     ${soon.length ? `<button class="banner ${soon.some(i => freshness(i) === 'expired') ? 'red' : ''}" id="soon">
         <span>⏰</span><span><b>${soon.length} item${soon.length > 1 ? 's' : ''} expiring soon</b><br><small>${esc(soon.slice(0, 3).map(i => i.name).join(', '))}${soon.length > 3 ? '…' : ''}</small></span><span>›</span></button>` : ''}
     <div class="search"><span>🔎</span><input id="q" type="search" placeholder="Search items" value="${esc(S.q)}" autocomplete="off"></div>
@@ -144,10 +154,14 @@ function emptyState() {
 }
 function itemRow(i: Item) {
   const c = catOf(i.categoryId); const f = freshness(i);
+  const pill = i.expiryStatus === 'reading' ? 'reading' : i.expiryStatus === 'failed' ? 'failed' : f + (i.expiryStatus === 'pending' ? ' pending' : '');
+  const body = i.expiryStatus === 'reading'
+    ? `<i class="spin-sm" aria-hidden="true"></i> Reading…`
+    : esc(expiryLabel(i));
   return `<li class="item" data-id="${i.id}">
     <div class="thumb">${i.image ? `<img src="${esc(i.image)}" alt="" loading="lazy" onerror="this.replaceWith(document.createTextNode('${c.icon}'))">` : c.icon}</div>
     <div class="meta"><div class="name">${esc(i.name)}</div><div class="sub">${esc(i.location)}${i.quantity > 1 ? ` · ×${i.quantity}` : ''}${i.opened ? ' · opened' : ''}</div></div>
-    <span class="pill ${f}">${expiryLabel(i)}</span></li>`;
+    <span class="pill ${pill}">${body}</span></li>`;
 }
 const STATUS_CHIPS: [StatusFilter, string, string][] = [
   ['all', 'All', ''],
@@ -205,6 +219,7 @@ function bindItems() {
   q?.addEventListener('input', () => { S.q = q.value; $('#results').innerHTML = resultsHtml(); bindResults(); });
   document.querySelectorAll<HTMLElement>('[data-view]').forEach(b => b.onclick = () => { S.view = b.dataset.view as any; S.cat = 'all'; render(); });
   $('#soon')?.addEventListener('click', () => showStatus('attention'));
+  $('#dates-check')?.addEventListener('click', openDatesSheet);
   $('#filter-btn')?.addEventListener('click', openFilterSheet);
   $<HTMLSelectElement>('#sort')?.addEventListener('change', e => { S.sort = (e.target as HTMLSelectElement).value as any; render(); });
   document.querySelectorAll<HTMLElement>('[data-clear]').forEach(b => b.onclick = () => {
@@ -274,14 +289,14 @@ function addMenu() {
     <button class="action" data-a="manual"><span>✏️</span><span><b>Add manually</b><small>Type it in</small></span></button>`);
   s.el.querySelectorAll<HTMLElement>('[data-a]').forEach(b => b.onclick = () => {
     s.close();
-    ({ barcode: barcodeFlow, receipt: receiptFlow, manual: () => editItem(null) } as any)[b.dataset.a!]();
+    ({ barcode: barcodeFlow, receipt: receiptFlow, manual: () => editItem(null, {}, false, 'menu') } as any)[b.dataset.a!]();
   });
 }
 
 async function barcodeFlow() {
   const code = await (await scanner()).scanBarcode();
   if (!code) return;
-  if (code === 'manual') return editItem(null);
+  if (code === 'manual') return editItem(null, {}, false, 'barcode');
   const done = busy('Looking up product…');
   const p = await lookupBarcode(code);
   done();
@@ -293,7 +308,7 @@ async function barcodeFlow() {
   if (!p) toast('Product not found. Enter the details.');
   const name = p ? [p.name, p.quantity].filter(Boolean).join(' ') : '';
   const catId = name ? guessCategory(`${name} ${p?.categoriesText ?? ''}`) : 'other';
-  editItem(null, { name, brand: p?.brand, image: p?.image, barcode: code, categoryId: catId, location: defaultLocation(catId) }, !!name);
+  editItem(null, { name, brand: p?.brand, image: p?.image, barcode: code, categoryId: catId, location: defaultLocation(catId) }, !!name, 'barcode');
 }
 
 async function receiptFlow() {
@@ -338,7 +353,7 @@ async function saveItem(i: Item) {
 }
 
 // ---------- item editor ----------
-function editItem(existing: Item | null, prefill: Partial<Item> = {}, autoCat = false) {
+function editItem(existing: Item | null, prefill: Partial<Item> = {}, autoCat = false, nextAdd: 'barcode' | 'menu' | null = null) {
   const it: Item = existing ? { ...existing } : { ...blank(), ...prefill };
   let catTouched = !!existing || (!!prefill.categoryId && !autoCat);
   const s = sheet(`
@@ -346,8 +361,8 @@ function editItem(existing: Item | null, prefill: Partial<Item> = {}, autoCat = 
     ${existing ? `<div class="finish"><button class="btn used" id="e-used">✅ Used it</button><button class="btn binned" id="e-binned">🗑️ Binned it</button></div>` : ''}
     <label class="field"><span>Name</span><input id="e-name" value="${esc(it.name)}" placeholder="e.g. Greek yoghurt" autocomplete="off"></label>
     <label class="field"><span>Expiry date</span>
-      <div class="date-row"><input id="e-exp" type="date" value="${it.expiry ?? ''}"><button class="btn tonal" id="e-scan">📷 Scan</button></div>
-      <small class="muted" id="e-exp-note">${it.expiryMonthOnly ? 'Month-only date: set to end of month' : ''}</small></label>
+      <div class="date-row"><input id="e-exp" type="date" value="${it.expiryStatus === 'reading' || it.expiryStatus === 'failed' ? '' : (it.expiry ?? '')}"><button class="btn tonal" id="e-scan">📷 Scan</button></div>
+      <small class="muted" id="e-exp-note">${expiryNote(it)}</small></label>
     <div class="field"><span>Category <small class="muted" id="e-cat-ai"></small></span><div class="cat-pick" id="e-cats">${S.cats.map(c => `<button class="chip ${c.id === it.categoryId ? 'on' : ''}" data-c="${c.id}">${c.icon} ${esc(c.name)}</button>`).join('')}</div></div>
     <div class="field"><span>Stored in</span><div class="seg" id="e-loc">${(['Fridge', 'Freezer', 'Pantry'] as Location[]).map(l => `<button data-l="${l}" class="${it.location === l ? 'on' : ''}">${{ Fridge: '❄️', Freezer: '🧊', Pantry: '🗄️' }[l]} ${l}</button>`).join('')}</div></div>
     <div class="two">
@@ -378,25 +393,37 @@ function editItem(existing: Item | null, prefill: Partial<Item> = {}, autoCat = 
   };
   $('#e-name', el).addEventListener('change', autoCategorise);
   if (autoCat) autoCategorise();
-  $('#e-exp', el).addEventListener('change', () => { it.expiryMonthOnly = false; $('#e-exp-note', el).textContent = ''; });
+  $('#e-exp', el).addEventListener('change', () => { it.expiryMonthOnly = false; it.expiryStatus = undefined; it.expiryRaw = undefined; $('#e-exp-note', el).textContent = ''; });
 
-  $('#e-scan', el).onclick = async () => {
-    const r = await scanExpiry();
-    if (!r) return;
-    $<HTMLInputElement>('#e-exp', el).value = r.iso; it.expiryMonthOnly = r.monthOnly;
-    $('#e-exp-note', el).textContent = r.monthOnly ? 'Month-only date: set to end of month' : '';
-  };
-  $('#e-save', el).onclick = async () => {
+  const readForm = () => {
     it.name = $<HTMLInputElement>('#e-name', el).value.trim();
-    if (!it.name) { $<HTMLInputElement>('#e-name', el).focus(); return toast('Give it a name'); }
-    it.expiry = $<HTMLInputElement>('#e-exp', el).value || undefined;
+    const typed = $<HTMLInputElement>('#e-exp', el).value || undefined;
+    if (typed) { it.expiry = typed; it.expiryStatus = undefined; it.expiryRaw = undefined; }
+    else if (it.expiryStatus !== 'reading' && it.expiryStatus !== 'pending') { it.expiry = undefined; }
     it.opened = $<HTMLInputElement>('#e-open', el).value || undefined;
     it.quantity = Math.max(1, +qty.value || 1);
     it.brand = $<HTMLInputElement>('#e-brand', el).value.trim() || undefined;
-    await saveItem(it); s.close(); if (!existing) S.tab = 'items'; render(); toast(existing ? 'Saved' : 'Added');
+  };
+  $('#e-scan', el).onclick = async () => {
+    readForm();
+    if (!it.name) { $<HTMLInputElement>('#e-name', el).focus(); return toast('Give it a name first'); }
+    const blob = await captureExpiryPhoto();
+    if (!blob) return;
+    await startExpiryRead(it, blob);
+    s.close(); S.tab = 'items'; render();
+    await afterNewItem(it, existing ? null : (nextAdd ?? 'menu'), true);
+  };
+  $('#e-save', el).onclick = async () => {
+    readForm();
+    if (!it.name) { $<HTMLInputElement>('#e-name', el).focus(); return toast('Give it a name'); }
+    if (it.expiry && it.expiryStatus !== 'pending') { it.expiryStatus = undefined; it.expiryRaw = undefined; }
+    await saveItem(it); s.close(); S.tab = 'items';
+    if (!existing) await afterNewItem(it, nextAdd ?? 'menu', it.expiryStatus === 'reading');
+    else { render(); toast('Saved'); }
   };
   $('#e-del', el)?.addEventListener('click', async () => {
     if (!confirm(`Delete ${it.name}?`)) return;
+    await cancelExpiryJobs(it.id);
     await db.del('items', it.id); S.items = S.items.filter(x => x.id !== it.id); s.close(); render();
   });
   const finish = async (type: 'used' | 'binned') => {
@@ -405,7 +432,7 @@ function editItem(existing: Item | null, prefill: Partial<Item> = {}, autoCat = 
     const cur = { ...existing! };
     if (cur.quantity > 1) { cur.quantity--; await saveItem(cur); toast(`${type === 'used' ? 'Used' : 'Binned'} one. ${cur.quantity} left.`); }
     else {
-      cur.status = type; cur.finishedAt = Date.now(); await saveItem(cur);
+      cur.status = type; cur.finishedAt = Date.now(); await cancelExpiryJobs(cur.id); await saveItem(cur);
       if (!S.shop.some(x => !x.done && x.name.toLowerCase() === cur.name.toLowerCase())) {
         const si: ShopItem = { id: db.uid(), name: cur.name, done: false, addedAt: Date.now(), fromItemId: cur.id };
         await db.put('shopping', si); S.shop.push(si);
@@ -419,39 +446,193 @@ function editItem(existing: Item | null, prefill: Partial<Item> = {}, autoCat = 
   if (!existing && !it.name) setTimeout(() => $<HTMLInputElement>('#e-name', el).focus(), 300);
 }
 
-/** Capture → read with AI (or Tesseract offline) → confirm/edit. Returns null if cancelled. */
-async function scanExpiry(): Promise<{ iso: string; monthOnly: boolean } | null> {
-  const blob = await (await scanner()).capturePhoto('Scan expiry date', 'Fill the box with the date, e.g. “BB 12/03/26”');
-  if (!blob) return null;
-  const done = busy('Reading date…');
-  let iso: string | null = null, monthOnly = false, raw = '', err = '';
-  try {
-    if (hasKey(S.settings)) {
-      const r = await readExpiry(S.settings, await fileToJpeg(blob, 1280));
-      raw = r.raw;
-      // Prefer our deterministic DD/MM parser on the text the AI saw; fall back to the AI's own date.
-      const p = parseExpiry(r.raw);
-      if (p) { iso = p.iso; monthOnly = p.monthOnly; } else if (r.date) { iso = r.date; monthOnly = r.monthOnly; }
-    } else {
-      raw = (await (await scanner()).ocrText(blob)).replace(/\s+/g, ' ').trim();
-      const p = parseExpiry(raw); if (p) { iso = p.iso; monthOnly = p.monthOnly; raw = p.raw; }
-    }
-  } catch (e: any) { err = e.message; }
-  done();
+function expiryNote(it: Item) {
+  if (it.expiryStatus === 'reading') return 'Reading the date in the background…';
+  if (it.expiryStatus === 'failed') return "Couldn't read a date. Scan again or enter it here.";
+  if (it.expiryStatus === 'pending') return 'Suggested date — confirm it from Dates to check, or edit it here.';
+  if (it.expiryMonthOnly) return 'Month-only date: set to end of month';
+  return '';
+}
+function prettyDate(iso: string, monthOnly?: boolean) {
+  return monthOnly ? localDate(iso).toLocaleDateString('en-AU', { month: 'long', year: 'numeric' }) : formatDate(iso);
+}
+
+const captureExpiryPhoto = () => scanner().then(m => m.capturePhoto('Scan expiry date', 'Fill the box with the date, e.g. “BB 12/03/26”'));
+
+async function startExpiryRead(item: Item, blob: Blob) {
+  item.expiry = undefined; item.expiryMonthOnly = undefined; item.expiryRaw = undefined; item.expiryStatus = 'reading';
+  await saveItem(item);
+  const job: db.ExpiryJob = { id: db.uid(), itemId: item.id, photo: blob, addedAt: Date.now(), attempts: 0 };
+  await db.put('expiryJobs', job);
+  pumpExpiryJobs();
+}
+async function cancelExpiryJobs(itemId: string) {
+  for (const j of (await db.getAll<db.ExpiryJob>('expiryJobs')).filter(j => j.itemId === itemId)) await db.del('expiryJobs', j.id);
+}
+
+async function afterNewItem(item: Item, nextAdd: 'barcode' | 'menu' | null, alreadyScanning: boolean) {
+  render();
+  if (alreadyScanning) {
+    toast('Reading date… you can add another item');
+    if (nextAdd === 'barcode') await barcodeFlow();
+    else if (nextAdd === 'menu') addMenu();
+    return;
+  }
+  if (item.expiry && !item.expiryStatus) { toast('Added'); return; }
+  const choice = await offerScanExpiry(item);
+  render();
+  if (choice === 'done') { toast('Added'); return; }
+  if (choice === 'scanned') toast('Reading date… you can add another item');
+  if (nextAdd === 'barcode') await barcodeFlow();
+  else if (nextAdd === 'menu') addMenu();
+}
+function offerScanExpiry(item: Item): Promise<'scanned' | 'skip' | 'done'> {
   return new Promise(resolve => {
-    const s = sheet(`<h2>${iso ? 'Is this right?' : "Couldn't read a date"}</h2>
-      ${iso ? `<p class="big-date">${monthOnly ? localDate(iso).toLocaleDateString('en-AU', { month: 'long', year: 'numeric' }) : formatDate(iso)}</p>` : ''}
-      ${raw ? `<p class="muted">Read: “${esc(raw.slice(0, 80))}”</p>` : ''}${err ? `<p class="muted">${esc(err)}</p>` : ''}
-      ${monthOnly ? '<p class="muted">Month-only date. It will be set to the last day of the month.</p>' : ''}
-      <label class="field"><span>${iso ? 'Adjust if needed' : 'Enter it manually'}</span><input id="x-date" type="date" value="${iso ?? ''}"></label>
-      <div class="sheet-foot"><button class="btn ghost" id="x-retry">Retake</button><button class="btn primary" id="x-ok">Use date</button></div>`);
+    const s = sheet(`<h2>Scan expiry?</h2>
+      <p>Add a date for <b>${esc(item.name)}</b>. You can keep adding while it reads in the background.</p>
+      <div class="sheet-foot"><button class="btn ghost" id="sx-skip">Not now</button><button class="btn primary" id="sx-scan">📷 Scan expiry</button></div>`);
     let settled = false;
-    const out = (v: { iso: string; monthOnly: boolean } | null) => { if (!settled) { settled = true; s.close(); resolve(v); } };
-    $('#x-ok', s.el).onclick = () => { const v = $<HTMLInputElement>('#x-date', s.el).value; if (!v) return toast('Pick a date'); out({ iso: v, monthOnly: v === iso && monthOnly }); };
-    $('#x-retry', s.el).onclick = async () => { settled = true; s.close(); resolve(await scanExpiry()); };
-    s.el.parentElement!.addEventListener('click', e => { if (e.target === s.el.parentElement) out(null); });
+    const out = (v: 'scanned' | 'skip' | 'done') => { if (!settled) { settled = true; s.close(); resolve(v); } };
+    $('#sx-skip', s.el).onclick = () => out('skip');
+    $('#sx-scan', s.el).onclick = async () => {
+      const blob = await captureExpiryPhoto();
+      if (!blob) { out('skip'); return; }
+      await startExpiryRead(item, blob);
+      out('scanned');
+    };
+    s.el.parentElement!.addEventListener('click', e => { if (e.target === s.el.parentElement) out('done'); });
   });
 }
+
+async function readExpiryPhoto(blob: Blob): Promise<{ iso: string | null; monthOnly: boolean; raw: string }> {
+  let iso: string | null = null, monthOnly = false, raw = '';
+  if (hasKey(S.settings)) {
+    const r = await readExpiry(S.settings, await fileToJpeg(blob, 1280));
+    raw = r.raw;
+    // Prefer our deterministic DD/MM parser on the text the AI saw; fall back to the AI's own date.
+    const p = parseExpiry(r.raw);
+    if (p) { iso = p.iso; monthOnly = p.monthOnly; } else if (r.date) { iso = r.date; monthOnly = r.monthOnly; }
+  } else {
+    raw = (await (await scanner()).ocrText(blob)).replace(/\s+/g, ' ').trim();
+    const p = parseExpiry(raw); if (p) { iso = p.iso; monthOnly = p.monthOnly; raw = p.raw; }
+  }
+  return { iso, monthOnly, raw };
+}
+function isTransient(e: unknown) {
+  return /fail(ed)? to fetch|network|timeout|429|500|502|503|504|unavailable|overloaded|rate.?limit|temporar|offline|abort/i.test(String((e as any)?.message ?? e ?? ''));
+}
+
+const JOB_CONCURRENCY = 2;
+const runningJobs = new Set<string>();
+async function pumpExpiryJobs() {
+  const jobs = (await db.getAll<db.ExpiryJob>('expiryJobs')).sort((a, b) => a.addedAt - b.addedAt);
+  for (const job of jobs) {
+    if (runningJobs.size >= JOB_CONCURRENCY) break;
+    if (runningJobs.has(job.id)) continue;
+    runningJobs.add(job.id);
+    void runExpiryJob(job).finally(() => { runningJobs.delete(job.id); pumpExpiryJobs(); });
+  }
+}
+async function runExpiryJob(job: db.ExpiryJob) {
+  const still = () => {
+    const it = S.items.find(i => i.id === job.itemId);
+    return it && it.status === 'active' && it.expiryStatus === 'reading' ? it : null;
+  };
+  if (!still()) { await db.del('expiryJobs', job.id); return; }
+  job.attempts++;
+  await db.put('expiryJobs', job);
+  try {
+    const r = await readExpiryPhoto(job.photo);
+    const cur = still();
+    if (!cur) { await db.del('expiryJobs', job.id); return; }
+    if (r.iso) { cur.expiry = r.iso; cur.expiryMonthOnly = r.monthOnly; cur.expiryRaw = r.raw || undefined; cur.expiryStatus = 'pending'; }
+    else { cur.expiry = undefined; cur.expiryMonthOnly = undefined; cur.expiryRaw = r.raw || undefined; cur.expiryStatus = 'failed'; }
+    await saveItem(cur);
+    await db.del('expiryJobs', job.id);
+    render();
+    toast(r.iso ? `${cur.name}: date ready to check` : `${cur.name}: couldn't read the date`);
+  } catch (e) {
+    if (job.attempts < 3 && isTransient(e)) {
+      await new Promise(ok => setTimeout(ok, 1500 * job.attempts));
+      return;
+    }
+    const cur = still();
+    if (cur) { cur.expiryStatus = 'failed'; await saveItem(cur); render(); }
+    await db.del('expiryJobs', job.id);
+  }
+}
+async function resumeExpiryJobs() {
+  const jobs = await db.getAll<db.ExpiryJob>('expiryJobs');
+  const ids = new Set(jobs.map(j => j.itemId));
+  for (const it of S.items) {
+    if (it.expiryStatus === 'reading' && !ids.has(it.id)) { it.expiryStatus = 'failed'; await saveItem(it); }
+  }
+  for (const j of jobs) {
+    const it = S.items.find(i => i.id === j.itemId);
+    if (!it || it.status !== 'active') await db.del('expiryJobs', j.id);
+  }
+  pumpExpiryJobs();
+}
+
+function openDatesSheet() {
+  const s = sheet(`<div id="dates-body">${datesSheetHtml()}</div>`);
+  const paint = () => {
+    if (!datesToCheck().length) { s.close(); render(); return; }
+    $('#dates-body', s.el).innerHTML = datesSheetHtml();
+    bind();
+  };
+  const apply = async (id: string, iso: string, monthOnly: boolean) => {
+    const it = S.items.find(x => x.id === id); if (!it) return;
+    it.expiry = iso; it.expiryMonthOnly = monthOnly; it.expiryStatus = undefined; it.expiryRaw = undefined;
+    await saveItem(it); render(); paint();
+  };
+  const bind = () => {
+    s.el.querySelectorAll<HTMLElement>('[data-confirm]').forEach(b => b.onclick = () => {
+      const it = S.items.find(x => x.id === b.dataset.confirm); if (!it?.expiry) return toast('Pick a date first');
+      apply(it.id, it.expiry, !!it.expiryMonthOnly);
+    });
+    s.el.querySelectorAll<HTMLElement>('[data-edit]').forEach(b => b.onclick = () => {
+      const row = b.closest('li')!; const box = $('.edit-date', row);
+      box.hidden = !box.hidden; if (!box.hidden) $<HTMLInputElement>('input', box).focus();
+    });
+    s.el.querySelectorAll<HTMLElement>('[data-use]').forEach(b => b.onclick = () => {
+      const v = $<HTMLInputElement>('input', b.closest('.edit-date')!).value; if (!v) return toast('Pick a date');
+      apply(b.dataset.use!, v, false);
+    });
+    s.el.querySelectorAll<HTMLElement>('[data-retake]').forEach(b => b.onclick = async () => {
+      const it = S.items.find(x => x.id === b.dataset.retake); if (!it) return;
+      const blob = await captureExpiryPhoto(); if (!blob) return;
+      await startExpiryRead(it, blob); render();
+      if (!datesToCheck().length) { s.close(); return; }
+      paint();
+    });
+  };
+  bind();
+}
+function datesSheetHtml() {
+  const rows = datesToCheck();
+  return `<h2>Dates to check</h2>
+    <p class="muted">These dates are not final until you confirm them.</p>
+    <ul class="dates-list">${rows.map(i => {
+      const c = catOf(i.categoryId);
+      const ok = i.expiryStatus === 'pending' && i.expiry;
+      return `<li>
+        <div class="thumb">${i.image ? `<img src="${esc(i.image)}" alt="">` : c.icon}</div>
+        <div class="meta">
+          <div class="name">${esc(i.name)}</div>
+          <div class="sub">${ok ? prettyDate(i.expiry!, i.expiryMonthOnly) : "Couldn't read a date"}</div>
+          ${i.expiryRaw ? `<div class="sub">Read: “${esc(i.expiryRaw.slice(0, 80))}”</div>` : ''}
+          <div class="edit-date" hidden><input type="date" value="${i.expiry ?? ''}"><button class="btn tonal" data-use="${i.id}">Use date</button></div>
+          <div class="date-actions">
+            ${ok ? `<button class="btn primary" data-confirm="${i.id}">Confirm</button>` : ''}
+            <button class="btn ghost" data-edit="${i.id}">${ok ? 'Edit' : 'Enter date'}</button>
+            <button class="btn ghost" data-retake="${i.id}">Retake</button>
+          </div>
+        </div>
+      </li>`;
+    }).join('')}</ul>`;
+}
+
 
 // ---------- shopping ----------
 function shoppingView() {
@@ -599,7 +780,11 @@ async function checkReminders(force = false) {
 // ---------- boot ----------
 (async () => {
   await load();
-  if (new URLSearchParams(location.search).has('demo') && !S.items.length) await seedDemo();
+  const params = new URLSearchParams(location.search);
+  if (params.has('demo') && !S.items.length) await seedDemo();
+  await resumeExpiryJobs();
+  const shot = params.get('shot');
+  if (shot === 'reading' || shot === 'dates') await seedShot(shot);
   render();
   checkReminders();
   document.addEventListener('visibilitychange', () => { if (document.visibilityState === 'visible') { render(); checkReminders(); } });
@@ -617,4 +802,22 @@ async function seedDemo() {
   ];
   for (const [name, categoryId, location, quantity, days] of rows) await saveItem({ ...blank(), name, categoryId, location, quantity, expiry: days === null ? undefined : d(days) });
   const si: ShopItem = { id: db.uid(), name: 'Eggs', done: false, addedAt: Date.now() }; await db.put('shopping', si); S.shop.push(si);
+}
+
+/** ?demo&shot=reading|dates sets sample expiry-read states for screenshots. */
+async function seedShot(shot: 'reading' | 'dates') {
+  if (!S.items.length) await seedDemo();
+  const milk = S.items.find(i => /milk/i.test(i.name)) ?? S.items[0];
+  const yog = S.items.find(i => /yoghurt|yogurt/i.test(i.name)) ?? S.items[1];
+  if (shot === 'reading') {
+    Object.assign(milk, { expiry: undefined, expiryMonthOnly: undefined, expiryRaw: undefined, expiryStatus: 'reading' });
+    await saveItem(milk);
+  } else {
+    const d = (n: number) => { const x = new Date(); x.setDate(x.getDate() + n); return `${x.getFullYear()}-${String(x.getMonth() + 1).padStart(2, '0')}-${String(x.getDate()).padStart(2, '0')}`; };
+    Object.assign(milk, { expiry: d(2), expiryMonthOnly: false, expiryRaw: 'BB 17/11/26', expiryStatus: 'pending' });
+    Object.assign(yog, { expiry: undefined, expiryMonthOnly: undefined, expiryRaw: '', expiryStatus: 'failed' });
+    const spin = S.items.find(i => /spinach/i.test(i.name));
+    if (spin) { Object.assign(spin, { expiry: d(1), expiryMonthOnly: false, expiryRaw: 'USE BY 16 NOV 26', expiryStatus: 'pending' }); await saveItem(spin); }
+    await saveItem(milk); await saveItem(yog);
+  }
 }

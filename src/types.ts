@@ -13,6 +13,8 @@ export interface Item {
   unit?: string;
   expiry?: string;       // yyyy-mm-dd
   expiryMonthOnly?: boolean;
+  expiryStatus?: 'reading' | 'pending' | 'failed'; // undefined = confirmed (or no date)
+  expiryRaw?: string;    // text the scanner read, until the date is confirmed
   opened?: string;       // yyyy-mm-dd
   addedAt: number;
   status: Status;
