@@ -1,6 +1,6 @@
 // Offline support: cache the app shell, serve same-origin files cache-first and update in the background.
 // API calls (Open Food Facts, Gemini, OpenAI) always go to the network.
-const CACHE = 'pantry-v1';
+const CACHE = 'pantry-v2';
 const SHELL = ['./', './index.html', './manifest.webmanifest', './icons/icon-192.png', './icons/apple-touch-icon.png'];
 
 self.addEventListener('install', e => {

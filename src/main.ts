@@ -10,11 +10,13 @@ const scanner = () => import('./scanner');
 
 // ---------- state ----------
 type Tab = 'items' | 'shopping' | 'stats' | 'settings';
+type StatusFilter = 'all' | 'soon' | 'expired' | 'fresh' | 'none' | 'attention';
 const S = {
   tab: 'items' as Tab,
   items: [] as Item[], cats: [] as Category[], shop: [] as ShopItem[], events: [] as WasteEvent[],
   settings: db.DEFAULT_SETTINGS as Settings,
   q: '', cat: 'all', loc: 'all' as 'all' | Location, sort: 'expiry' as 'expiry' | 'name' | 'added', view: 'list' as 'list' | 'grid',
+  status: 'all' as StatusFilter,
 };
 const $ = <T extends HTMLElement = HTMLElement>(sel: string, root: ParentNode = document) => root.querySelector(sel) as T;
 const esc = (s: unknown) => String(s ?? '').replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]!));
@@ -82,13 +84,14 @@ function render() {
     </nav>`;
   app.querySelectorAll<HTMLElement>('[data-tab]').forEach(b => b.onclick = () => { S.tab = b.dataset.tab as Tab; render(); window.scrollTo(0, 0); });
   $('#fab').onclick = addMenu;
-  ({ items: bindItems, shopping: bindShopping, stats: () => {}, settings: bindSettings })[S.tab]();
+  ({ items: bindItems, shopping: bindShopping, stats: bindStats, settings: bindSettings })[S.tab]();
 }
 const tabBtn = (t: Tab, icon: string, label: string, badge = 0) =>
   `<button class="tab ${S.tab === t ? 'on' : ''}" data-tab="${t}"><span class="ti">${icon}${badge ? `<b class="badge">${badge}</b>` : ''}</span><span>${label}</span></button>`;
 
 function itemsView() {
   const soon = expiringSoon();
+  const n = activeFilterCount();
   return `
     <header class="hdr"><h1>Pantry</h1>
       <div class="seg small" role="tablist">
@@ -99,40 +102,45 @@ function itemsView() {
     ${soon.length ? `<button class="banner ${soon.some(i => freshness(i) === 'expired') ? 'red' : ''}" id="soon">
         <span>⏰</span><span><b>${soon.length} item${soon.length > 1 ? 's' : ''} expiring soon</b><br><small>${esc(soon.slice(0, 3).map(i => i.name).join(', '))}${soon.length > 3 ? '…' : ''}</small></span><span>›</span></button>` : ''}
     <div class="search"><span>🔎</span><input id="q" type="search" placeholder="Search items" value="${esc(S.q)}" autocomplete="off"></div>
-    <div id="results">${resultsHtml()}</div>`;
-}
-function resultsHtml() {
-  const list = filtered();
-  const usedCats = S.cats.filter(c => active().some(i => i.categoryId === c.id));
-  if (S.view === 'grid' && S.cat === 'all' && !S.q) return gridView();
-  return `
-    <div class="chips">
-      <button class="chip ${S.cat === 'all' ? 'on' : ''}" data-cat="all">All</button>
-      ${usedCats.map(c => `<button class="chip ${S.cat === c.id ? 'on' : ''}" data-cat="${c.id}">${c.icon} ${esc(c.name)}</button>`).join('')}
-    </div>
     <div class="row-between">
-      <div class="seg small">${(['all', 'Fridge', 'Freezer', 'Pantry'] as const).map(l => `<button data-loc="${l}" class="${S.loc === l ? 'on' : ''}">${l === 'all' ? 'All' : l}</button>`).join('')}</div>
+      <button class="btn-filter ${n ? 'on' : ''}" id="filter-btn" aria-label="${n ? `Filter, ${n} active` : 'Filter'}">Filter${n ? `<b class="fbadge">${n}</b>` : ''}</button>
       <select id="sort" class="sort" aria-label="Sort">
         <option value="expiry" ${S.sort === 'expiry' ? 'selected' : ''}>⇅ Expiry</option>
         <option value="name" ${S.sort === 'name' ? 'selected' : ''}>⇅ A–Z</option>
         <option value="added" ${S.sort === 'added' ? 'selected' : ''}>⇅ Newest</option>
       </select>
     </div>
-    ${list.length ? `<ul class="list">${list.map(itemRow).join('')}</ul>` : emptyState()}`;
+    ${activeFilterChips()}
+    <div id="results">${resultsHtml()}</div>`;
+}
+function resultsHtml() {
+  const list = filtered();
+  if (S.view === 'grid' && S.cat === 'all' && !S.q) return gridView();
+  return list.length ? `<ul class="list">${list.map(itemRow).join('')}</ul>` : emptyState();
 }
 function gridView() {
   const counts = S.cats.map(c => {
-    const its = active().filter(i => i.categoryId === c.id);
+    const its = itemsMatching({ cat: c.id });
     return { c, n: its.length, alert: its.some(i => ['soon', 'expired'].includes(freshness(i))) };
   }).filter(x => x.n);
   if (!counts.length) return emptyState();
   return `<div class="grid">${counts.map(({ c, n, alert }) => `
     <button class="tile" data-cat="${c.id}">${alert ? '<i class="dot"></i>' : ''}<span class="tile-icon">${c.icon}</span><span class="tile-name">${esc(c.name)}</span><span class="tile-n">${n} item${n > 1 ? 's' : ''}</span></button>`).join('')}</div>`;
 }
+
 function emptyState() {
-  return active().length
-    ? `<div class="empty"><p>No matching items.</p></div>`
-    : `<div class="empty"><div class="empty-icon">🧺</div><h3>Your pantry is empty</h3><p>Tap <b>＋</b> to scan a barcode or a receipt.</p></div>`;
+  if (!active().length) return `<div class="empty"><div class="empty-icon">🧺</div><h3>Your pantry is empty</h3><p>Tap <b>＋</b> to scan a barcode or a receipt.</p></div>`;
+  const copy: Record<StatusFilter, { icon: string; title: string; body: string }> = {
+    all: { icon: '🔎', title: 'No matching items', body: 'Try a different search or filter.' },
+    soon: { icon: '⏰', title: 'No items expiring soon', body: 'Nothing is due within your reminder window.' },
+    expired: { icon: '⚠️', title: 'No expired items', body: 'Nothing in your pantry is past its date.' },
+    fresh: { icon: '✨', title: 'No fresh items', body: 'Nothing currently matches this filter.' },
+    none: { icon: '📅', title: 'No items without a date', body: 'Every item here has an expiry date.' },
+    attention: { icon: '✅', title: 'Nothing needs attention', body: 'No items are expired or expiring soon.' },
+  };
+  const m = copy[S.status];
+  const narrowed = S.q || S.cat !== 'all' || S.loc !== 'all';
+  return `<div class="empty"><div class="empty-icon">${m.icon}</div><h3>${m.title}</h3><p>${narrowed && S.status !== 'all' ? 'Try clearing search, category or location.' : m.body}</p></div>`;
 }
 function itemRow(i: Item) {
   const c = catOf(i.categoryId); const f = freshness(i);
@@ -141,10 +149,53 @@ function itemRow(i: Item) {
     <div class="meta"><div class="name">${esc(i.name)}</div><div class="sub">${esc(i.location)}${i.quantity > 1 ? ` · ×${i.quantity}` : ''}${i.opened ? ' · opened' : ''}</div></div>
     <span class="pill ${f}">${expiryLabel(i)}</span></li>`;
 }
+const STATUS_CHIPS: [StatusFilter, string, string][] = [
+  ['all', 'All', ''],
+  ['soon', 'Expiring soon', 'soon'],
+  ['expired', 'Expired', 'expired'],
+  ['fresh', 'Fresh', 'fresh'],
+  ['none', 'No date', 'none'],
+];
+const STATUS_LABEL: Record<StatusFilter, string> = {
+  all: 'All', soon: 'Expiring soon', expired: 'Expired', fresh: 'Fresh', none: 'No date', attention: 'Needs attention',
+};
+type FilterSet = { status: StatusFilter; cat: string; loc: 'all' | Location; q: string };
+const currentFilters = (): FilterSet => ({ status: S.status, cat: S.cat, loc: S.loc, q: S.q });
+function activeFilterCount(f: FilterSet = currentFilters()) {
+  return (f.status !== 'all' ? 1 : 0) + (f.cat !== 'all' ? 1 : 0) + (f.loc !== 'all' ? 1 : 0);
+}
+function itemsMatching(over: Partial<FilterSet> = {}) {
+  const f = { ...currentFilters(), ...over };
+  const q = f.q.trim().toLowerCase();
+  return active().filter(i => (f.cat === 'all' || i.categoryId === f.cat) && (f.loc === 'all' || i.location === f.loc) &&
+    (!q || `${i.name} ${i.brand ?? ''} ${catOf(i.categoryId).name}`.toLowerCase().includes(q)) &&
+    matchesStatus(i, f.status));
+}
+function matchesStatus(i: Item, status: StatusFilter = S.status) {
+  const f = freshness(i);
+  if (status === 'all') return true;
+  if (status === 'attention') return f === 'soon' || f === 'expired';
+  return f === status;
+}
+function statusOn(id: StatusFilter, status: StatusFilter = S.status) {
+  return status === id || (status === 'attention' && (id === 'soon' || id === 'expired'));
+}
+function statusCounts(f: FilterSet) {
+  const list = itemsMatching({ ...f, status: 'all' });
+  const n = (fresh: Fresh) => list.filter(i => freshness(i) === fresh).length;
+  return { all: list.length, soon: n('soon'), expired: n('expired'), fresh: n('fresh'), none: n('none') };
+}
+function activeFilterChips() {
+  const chips: { key: 'status' | 'cat' | 'loc'; label: string; cls: string }[] = [];
+  if (S.status !== 'all') chips.push({ key: 'status', label: STATUS_LABEL[S.status], cls: S.status === 'attention' ? 'soon' : S.status });
+  if (S.cat !== 'all') { const c = catOf(S.cat); chips.push({ key: 'cat', label: `${c.icon} ${c.name}`, cls: '' }); }
+  if (S.loc !== 'all') chips.push({ key: 'loc', label: S.loc, cls: '' });
+  if (!chips.length) return '';
+  return `<div class="chips active-filters">${chips.map(c =>
+    `<button class="chip rem ${c.cls}" data-clear="${c.key}">${esc(c.label)} <span class="x" aria-hidden="true">✕</span></button>`).join('')}</div>`;
+}
 function filtered() {
-  const q = S.q.trim().toLowerCase();
-  let list = active().filter(i => (S.cat === 'all' || i.categoryId === S.cat) && (S.loc === 'all' || i.location === S.loc) &&
-    (!q || `${i.name} ${i.brand ?? ''} ${catOf(i.categoryId).name}`.toLowerCase().includes(q)));
+  const list = itemsMatching();
   const by = { expiry: (a: Item, b: Item) => (a.expiry ?? '9999').localeCompare(b.expiry ?? '9999'), name: (a: Item, b: Item) => a.name.localeCompare(b.name), added: (a: Item, b: Item) => b.addedAt - a.addedAt };
   return list.sort(by[S.sort]);
 }
@@ -153,13 +204,65 @@ function bindItems() {
   // Only re-render the results while typing so the iOS keyboard stays open.
   q?.addEventListener('input', () => { S.q = q.value; $('#results').innerHTML = resultsHtml(); bindResults(); });
   document.querySelectorAll<HTMLElement>('[data-view]').forEach(b => b.onclick = () => { S.view = b.dataset.view as any; S.cat = 'all'; render(); });
-  $('#soon')?.addEventListener('click', () => { S.view = 'list'; S.cat = 'all'; S.loc = 'all'; S.q = ''; S.sort = 'expiry'; render(); });
+  $('#soon')?.addEventListener('click', () => showStatus('attention'));
+  $('#filter-btn')?.addEventListener('click', openFilterSheet);
+  $<HTMLSelectElement>('#sort')?.addEventListener('change', e => { S.sort = (e.target as HTMLSelectElement).value as any; render(); });
+  document.querySelectorAll<HTMLElement>('[data-clear]').forEach(b => b.onclick = () => {
+    const k = b.dataset.clear;
+    if (k === 'status') S.status = 'all';
+    else if (k === 'cat') S.cat = 'all';
+    else S.loc = 'all';
+    render();
+  });
   bindResults();
 }
+function showStatus(status: StatusFilter) {
+  S.tab = 'items'; S.view = 'list'; S.cat = 'all'; S.loc = 'all'; S.q = ''; S.sort = 'expiry'; S.status = status;
+  render(); window.scrollTo(0, 0);
+}
+function openFilterSheet() {
+  const draft: FilterSet = currentFilters();
+  const s = sheet(`<div id="filter-body">${filterSheetHtml(draft)}</div>`);
+  const paint = () => { $('#filter-body', s.el).innerHTML = filterSheetHtml(draft); bind(); };
+  const bind = () => {
+    s.el.querySelectorAll<HTMLElement>('[data-status]').forEach(b => b.onclick = () => { draft.status = b.dataset.status as StatusFilter; paint(); });
+    s.el.querySelectorAll<HTMLElement>('[data-cat]').forEach(b => b.onclick = () => { draft.cat = b.dataset.cat!; paint(); });
+    s.el.querySelectorAll<HTMLElement>('[data-loc]').forEach(b => b.onclick = () => { draft.loc = b.dataset.loc as FilterSet['loc']; paint(); });
+    $('#f-clear', s.el).onclick = () => { draft.status = 'all'; draft.cat = 'all'; draft.loc = 'all'; paint(); };
+    $('#f-apply', s.el).onclick = () => {
+      S.status = draft.status; S.cat = draft.cat; S.loc = draft.loc;
+      if (S.cat !== 'all' || S.status !== 'all' || S.loc !== 'all') S.view = 'list';
+      s.close(); render();
+    };
+  };
+  bind();
+}
+function filterSheetHtml(f: FilterSet) {
+  const sc = statusCounts(f);
+  const n = itemsMatching(f).length;
+  const usedCats = S.cats.filter(c => active().some(i => i.categoryId === c.id));
+  const catCount = (id: string) => itemsMatching({ ...f, cat: id }).length;
+  const locCount = (loc: FilterSet['loc']) => itemsMatching({ ...f, loc }).length;
+  const chip = (on: boolean, extra: string, attrs: string, label: string, count: number) =>
+    `<button class="chip ${extra} ${on ? 'on' : ''}" ${attrs}>${label} <span class="n">${count}</span></button>`;
+  return `
+    <h2>Filter</h2>
+    <h3 class="filter-h">Status</h3>
+    <div class="chips wrap">${STATUS_CHIPS.map(([id, label, cls]) =>
+      chip(statusOn(id, f.status), cls, `data-status="${id}"`, label, id === 'all' ? sc.all : sc[id as Fresh])).join('')}</div>
+    <h3 class="filter-h">Category</h3>
+    <div class="chips wrap">${chip(f.cat === 'all', '', 'data-cat="all"', 'All', itemsMatching({ ...f, cat: 'all' }).length)}
+      ${usedCats.map(c => chip(f.cat === c.id, '', `data-cat="${c.id}"`, `${c.icon} ${esc(c.name)}`, catCount(c.id))).join('')}</div>
+    <h3 class="filter-h">Location</h3>
+    <div class="chips wrap">${(['all', 'Fridge', 'Freezer', 'Pantry'] as const).map(l =>
+      chip(f.loc === l, '', `data-loc="${l}"`, l === 'all' ? 'All' : l, locCount(l))).join('')}</div>
+    <div class="sheet-foot">
+      <button class="btn ghost" id="f-clear" ${activeFilterCount(f) ? '' : 'disabled'}>Clear all</button>
+      <button class="btn primary" id="f-apply">Show ${n} item${n === 1 ? '' : 's'}</button>
+    </div>`;
+}
 function bindResults() {
-  document.querySelectorAll<HTMLElement>('[data-cat]').forEach(b => b.onclick = () => { S.cat = b.dataset.cat!; render(); });
-  document.querySelectorAll<HTMLElement>('[data-loc]').forEach(b => b.onclick = () => { S.loc = b.dataset.loc as any; render(); });
-  $<HTMLSelectElement>('#sort')?.addEventListener('change', e => { S.sort = (e.target as HTMLSelectElement).value as any; render(); });
+  document.querySelectorAll<HTMLElement>('[data-cat]').forEach(b => b.onclick = () => { S.cat = b.dataset.cat!; S.view = 'list'; render(); });
   document.querySelectorAll<HTMLElement>('.item').forEach(li => li.onclick = () => editItem(S.items.find(i => i.id === li.dataset.id)!));
 }
 
@@ -385,14 +488,17 @@ function statsView() {
   return `<header class="hdr"><h1>Stats</h1></header>
     <div class="cards">
       <div class="card"><b>${a.length}</b><span>In stock</span></div>
-      <div class="card amber"><b>${a.filter(i => freshness(i) === 'soon').length}</b><span>Expiring soon</span></div>
-      <div class="card red"><b>${a.filter(i => freshness(i) === 'expired').length}</b><span>Expired</span></div>
+      <button class="card amber" data-jump="soon" aria-label="Show items expiring soon"><b>${a.filter(i => freshness(i) === 'soon').length}</b><span>Expiring soon</span></button>
+      <button class="card red" data-jump="expired" aria-label="Show expired items"><b>${a.filter(i => freshness(i) === 'expired').length}</b><span>Expired</span></button>
     </div>
     <section class="panel"><h3>Last 30 days</h3>
       <div class="bar"><i style="width:${100 - pct}%"></i></div>
       <div class="row-between"><span>✅ Used <b>${used}</b></span><span>🗑️ Binned <b>${binned}</b></span></div>
       <p class="muted">${used + binned ? `You binned ${pct}% of what you finished.` : 'Tap “Used it” or “Binned it” on an item to start tracking waste.'}</p></section>
     ${top.length ? `<section class="panel"><h3>Most often binned</h3><ul class="plain">${top.map(([n, c]) => `<li><span>${esc(n)}</span><b>${c}×</b></li>`).join('')}</ul></section>` : ''}`;
+}
+function bindStats() {
+  document.querySelectorAll<HTMLElement>('[data-jump]').forEach(b => b.onclick = () => showStatus(b.dataset.jump as StatusFilter));
 }
 
 // ---------- settings ----------
