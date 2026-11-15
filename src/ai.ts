@@ -35,9 +35,13 @@ function httpError(msg: string, status: number) {
   e.status = status; return e;
 }
 
-async function callGemini(s: Settings, prompt: string, imageDataUrl?: string) {
+function imageList(images?: string | string[]) {
+  return images == null ? [] : Array.isArray(images) ? images : [images];
+}
+
+async function callGemini(s: Settings, prompt: string, images?: string | string[]) {
   const parts: any[] = [{ text: prompt }];
-  if (imageDataUrl) parts.push({ inline_data: { mime_type: 'image/jpeg', data: imageDataUrl.split(',')[1] } });
+  for (const url of imageList(images)) parts.push({ inline_data: { mime_type: 'image/jpeg', data: url.split(',')[1] } });
   const body = JSON.stringify({ contents: [{ role: 'user', parts }], generationConfig: { temperature: 0, responseMimeType: 'application/json' } });
   const models = [s.geminiModel, ...GEMINI_FALLBACK_MODELS.filter(m => m !== s.geminiModel)];
   let lastErr = '', lastStatus = 0;
@@ -59,9 +63,9 @@ async function callGemini(s: Settings, prompt: string, imageDataUrl?: string) {
   throw httpError('Gemini: ' + lastErr, lastStatus);
 }
 
-async function callOpenAI(s: Settings, prompt: string, imageDataUrl?: string) {
+async function callOpenAI(s: Settings, prompt: string, images?: string | string[]) {
   const content: any[] = [{ type: 'text', text: prompt }];
-  if (imageDataUrl) content.push({ type: 'image_url', image_url: { url: imageDataUrl, detail: 'high' } });
+  for (const url of imageList(images)) content.push({ type: 'image_url', image_url: { url, detail: 'high' } });
   const r = await fetch('https://api.openai.com/v1/chat/completions', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${s.openaiKey}` },
@@ -72,23 +76,44 @@ async function callOpenAI(s: Settings, prompt: string, imageDataUrl?: string) {
   return parseJSON(j.choices?.[0]?.message?.content ?? '');
 }
 
-export async function askAI(s: Settings, prompt: string, imageDataUrl?: string): Promise<any> {
+export async function askAI(s: Settings, prompt: string, images?: string | string[]): Promise<any> {
   if (!hasKey(s)) throw new Error('Add your AI key in Settings first');
-  return s.provider === 'gemini' ? callGemini(s, prompt, imageDataUrl) : callOpenAI(s, prompt, imageDataUrl);
+  return s.provider === 'gemini' ? callGemini(s, prompt, images) : callOpenAI(s, prompt, images);
 }
 
 const catList = (cats: Category[]) => cats.map(c => `${c.id} (${c.name})`).join(', ');
 
 export interface ReceiptLine { name: string; quantity: number; categoryId: string; price?: number; }
-export async function extractReceipt(s: Settings, image: string, cats: Category[]): Promise<ReceiptLine[]> {
-  const prompt = `You are reading an Australian supermarket receipt (e.g. Woolworths, Coles, Aldi, IGA).
-Extract only purchased grocery/household products. Ignore totals, subtotals, GST, discounts, savings, loyalty points, payment, change and store info.
-Expand abbreviations into clear readable product names, e.g. "WW FR MLK 2L" -> "Woolworths Full Cream Milk 2L", "CC BTR 250G" -> "Coles Butter 250g", "BNNA CAVNDSH KG" -> "Cavendish Bananas".
-If a line has a quantity multiplier (e.g. "2 @ $3.50" or "QTY 2") use it as quantity, otherwise 1. Merge duplicate lines by adding quantities.
-For each line include "price" as the amount charged for that line in Australian dollars (the line total, not a unit price, unless only a unit price is printed). If no price is visible, use null.
-Pick the best category id for each item from: ${catList(cats)}.
-Return JSON only: {"items":[{"name":string,"quantity":number,"categoryId":string,"price":number|null}]}`;
-  const j = await askAI(s, prompt, image);
+
+function sameReceiptLine(a: ReceiptLine, b: ReceiptLine) {
+  return a.name.trim().toLowerCase() === b.name.trim().toLowerCase() && (a.price ?? null) === (b.price ?? null);
+}
+
+/** Drop identical adjacent name+price lines, including leftover overlap duplicates. */
+export function dedupeAdjacentReceiptLines(lines: ReceiptLine[]): ReceiptLine[] {
+  const out: ReceiptLine[] = [];
+  for (const line of lines) {
+    const prev = out[out.length - 1];
+    if (prev && sameReceiptLine(prev, line)) continue;
+    out.push(line);
+  }
+  return out;
+}
+
+/** Join per-part lists, dropping a line only when it repeats at a part boundary. */
+export function mergeReceiptParts(parts: ReceiptLine[][]): ReceiptLine[] {
+  const out: ReceiptLine[] = [];
+  for (const part of parts) {
+    for (let i = 0; i < part.length; i++) {
+      const line = part[i];
+      if (i === 0 && out.length && sameReceiptLine(out[out.length - 1], line)) continue;
+      out.push(line);
+    }
+  }
+  return out;
+}
+
+function parseReceiptItems(j: any, cats: Category[]): ReceiptLine[] {
   const ids = new Set(cats.map(c => c.id));
   const money = (v: any) => {
     if (v == null || v === '') return undefined;
@@ -99,6 +124,34 @@ Return JSON only: {"items":[{"name":string,"quantity":number,"categoryId":string
     name: String(x.name).trim(), quantity: Math.max(1, Math.round(+x.quantity || 1)), categoryId: ids.has(x.categoryId) ? x.categoryId : 'other',
     price: money(x.price),
   }));
+}
+
+async function extractReceiptOnce(s: Settings, images: string[], cats: Category[]): Promise<ReceiptLine[]> {
+  const multi = images.length > 1;
+  const prompt = `You are reading an Australian supermarket receipt (e.g. Woolworths, Coles, Aldi, IGA).
+Extract only purchased grocery/household products. Ignore totals, subtotals, GST, discounts, savings, loyalty points, payment, change and store info.
+Expand abbreviations into clear readable product names, e.g. "WW FR MLK 2L" -> "Woolworths Full Cream Milk 2L", "CC BTR 250G" -> "Coles Butter 250g", "BNNA CAVNDSH KG" -> "Cavendish Bananas".
+If a line has a quantity multiplier (e.g. "2 @ $3.50" or "QTY 2") use it as quantity, otherwise 1. Merge duplicate lines by adding quantities.
+For each line include "price" as the amount charged for that line in Australian dollars (the line total, not a unit price, unless only a unit price is printed). If no price is visible, use null.
+Pick the best category id for each item from: ${catList(cats)}.
+${multi ? `These ${images.length} photos are consecutive overlapping sections of a SINGLE receipt, photographed from top to bottom and given in order (the first image is the top). Merge them into one item list. If a product line is repeated in the overlapping area between two parts, include it only once — do not duplicate it.
+` : ''}Return JSON only: {"items":[{"name":string,"quantity":number,"categoryId":string,"price":number|null}]}`;
+  const j = await askAI(s, prompt, images);
+  return parseReceiptItems(j, cats);
+}
+
+export async function extractReceipt(s: Settings, image: string | string[], cats: Category[]): Promise<ReceiptLine[]> {
+  const images = imageList(image);
+  if (!images.length) return [];
+  if (images.length === 1) return extractReceiptOnce(s, images, cats);
+  try {
+    return dedupeAdjacentReceiptLines(await extractReceiptOnce(s, images, cats));
+  } catch (e) {
+    // Combined request was too large or failed: read each part, then merge at the boundaries.
+    const parts: ReceiptLine[][] = [];
+    for (const img of images) parts.push(await extractReceiptOnce(s, [img], cats));
+    return mergeReceiptParts(parts);
+  }
 }
 
 export interface ExpiryRead { raw: string; date: string | null; monthOnly: boolean; }

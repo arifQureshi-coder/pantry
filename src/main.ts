@@ -83,16 +83,98 @@ function toast(msg: string) {
   document.body.appendChild(t); requestAnimationFrame(() => t.classList.add('show'));
   setTimeout(() => { t.classList.remove('show'); setTimeout(() => t.remove(), 300); }, 2400);
 }
-function sheet(html: string, opts: { full?: boolean } = {}) {
+function sheet(html: string, opts: { full?: boolean; title?: string; lead?: string; beforeClose?: () => boolean | Promise<boolean> } = {}) {
   const wrap = document.createElement('div');
   wrap.className = 'sheet-wrap';
-  wrap.innerHTML = `<div class="sheet ${opts.full ? 'full' : ''}"><div class="grabber"></div>${html}</div>`;
+  const lead = opts.lead ? `<img class="ed-img" src="${esc(opts.lead)}" alt="">` : '';
+  const title = `<h2 class="sheet-title">${esc(opts.title ?? '')}</h2>`;
+  wrap.innerHTML = `<div class="sheet ${opts.full ? 'full' : ''}"><div class="grabber" aria-hidden="true"></div>
+    <div class="sheet-bar"><button type="button" class="sheet-back" aria-label="Back">←</button>${lead}${title}</div>${html}</div>`;
   document.body.appendChild(wrap);
   requestAnimationFrame(() => wrap.classList.add('open'));
-  const close = () => { wrap.classList.remove('open'); setTimeout(() => wrap.remove(), 250); };
-  wrap.addEventListener('click', e => { if (e.target === wrap) close(); });
-  wrap.querySelectorAll('[data-close]').forEach(b => b.addEventListener('click', close));
-  return { el: wrap.querySelector('.sheet') as HTMLElement, close };
+  const el = wrap.querySelector('.sheet') as HTMLElement;
+  let closed = false;
+  const close = () => {
+    if (closed) return;
+    closed = true;
+    wrap.classList.remove('open');
+    setTimeout(() => wrap.remove(), 250);
+  };
+  const requestClose = async (): Promise<boolean> => {
+    if (closed) return true;
+    if (opts.beforeClose && (await opts.beforeClose()) === false) return false;
+    close();
+    return true;
+  };
+  wrap.addEventListener('click', e => { if (e.target === wrap) requestClose(); });
+  wrap.querySelectorAll('[data-close]').forEach(b => b.addEventListener('click', () => requestClose()));
+  $('.sheet-back', wrap).addEventListener('click', () => requestClose());
+  enableSwipeClose(el, requestClose);
+  return { el, close, requestClose };
+}
+function enableSwipeClose(sheetEl: HTMLElement, requestClose: () => Promise<boolean>) {
+  const wrap = sheetEl.parentElement!;
+  let startY = 0, startX = 0, dragging = false, active = false, dy = 0, fromHandle = false;
+  const reset = () => {
+    sheetEl.classList.remove('dragging');
+    sheetEl.style.transform = '';
+    wrap.style.background = '';
+  };
+  const onStart = (e: TouchEvent) => {
+    if (e.touches.length !== 1 || !wrap.classList.contains('open')) return;
+    const t = e.touches[0];
+    const target = t.target as Element;
+    fromHandle = !!target.closest('.grabber, .sheet-bar');
+    if (!fromHandle && sheetEl.scrollTop > 0) return;
+    startY = t.clientY; startX = t.clientX;
+    dragging = true; active = false; dy = 0;
+  };
+  const onMove = (e: TouchEvent) => {
+    if (!dragging) return;
+    const t = e.touches[0];
+    const raw = t.clientY - startY;
+    const dx = t.clientX - startX;
+    if (!active) {
+      if (Math.abs(dx) > 10 && Math.abs(dx) > raw) { dragging = false; return; }
+      if (raw < 10) return;
+      if (!fromHandle && sheetEl.scrollTop > 0) { dragging = false; return; }
+      active = true;
+      sheetEl.classList.add('dragging');
+    }
+    dy = Math.max(0, raw);
+    sheetEl.style.transform = `translateY(${dy}px)`;
+    wrap.style.background = `rgba(0,0,0,${0.4 * (1 - Math.min(dy / 420, 1))})`;
+    if (e.cancelable) e.preventDefault();
+  };
+  const onEnd = async () => {
+    if (!dragging) return;
+    dragging = false;
+    const shouldClose = active && dy > 100;
+    reset();
+    if (shouldClose) await requestClose();
+  };
+  sheetEl.addEventListener('touchstart', onStart, { passive: true });
+  sheetEl.addEventListener('touchmove', onMove, { passive: false });
+  sheetEl.addEventListener('touchend', onEnd);
+  sheetEl.addEventListener('touchcancel', onEnd);
+}
+function askDiscard(): Promise<boolean> {
+  return new Promise(resolve => {
+    const wrap = document.createElement('div');
+    wrap.className = 'confirm-wrap';
+    wrap.innerHTML = `<div class="confirm-box" role="dialog" aria-modal="true" aria-labelledby="discard-title">
+      <h3 id="discard-title">Discard changes?</h3>
+      <div class="confirm-actions">
+        <button type="button" class="btn ghost" data-a="keep">Keep editing</button>
+        <button type="button" class="btn danger-fill" data-a="discard">Discard</button>
+      </div>
+    </div>`;
+    document.body.appendChild(wrap);
+    const done = (v: boolean) => { wrap.remove(); resolve(v); };
+    wrap.addEventListener('click', e => { if (e.target === wrap) done(false); });
+    wrap.querySelector('[data-a=keep]')!.addEventListener('click', () => done(false));
+    wrap.querySelector('[data-a=discard]')!.addEventListener('click', () => done(true));
+  });
 }
 function busy(msg: string) {
   const el = document.createElement('div'); el.className = 'busy';
@@ -258,7 +340,7 @@ function showStatus(status: StatusFilter) {
 }
 function openFilterSheet() {
   const draft: FilterSet = currentFilters();
-  const s = sheet(`<div id="filter-body">${filterSheetHtml(draft)}</div>`);
+  const s = sheet(`<div id="filter-body">${filterSheetHtml(draft)}</div>`, { title: 'Filter' });
   const paint = () => { $('#filter-body', s.el).innerHTML = filterSheetHtml(draft); bind(); };
   const bind = () => {
     s.el.querySelectorAll<HTMLElement>('[data-status]').forEach(b => b.onclick = () => { draft.status = b.dataset.status as StatusFilter; paint(); });
@@ -282,7 +364,6 @@ function filterSheetHtml(f: FilterSet) {
   const chip = (on: boolean, extra: string, attrs: string, label: string, count: number) =>
     `<button class="chip ${extra} ${on ? 'on' : ''}" ${attrs}>${label} <span class="n">${count}</span></button>`;
   return `
-    <h2>Filter</h2>
     <h3 class="filter-h">Status</h3>
     <div class="chips wrap">${STATUS_CHIPS.map(([id, label, cls]) =>
       chip(statusOn(id, f.status), cls, `data-status="${id}"`, label, id === 'all' ? sc.all : sc[id as Fresh])).join('')}</div>
@@ -304,10 +385,10 @@ function bindResults() {
 
 // ---------- add flows ----------
 function addMenu() {
-  const s = sheet(`<h2>Add items</h2>
+  const s = sheet(`
     <button class="action" data-a="barcode"><span>📷</span><span><b>Scan barcode</b><small>Looks up the product for you</small></span></button>
     <button class="action" data-a="receipt"><span>🧾</span><span><b>Scan receipt</b><small>Adds a whole shop at once</small></span></button>
-    <button class="action" data-a="manual"><span>✏️</span><span><b>Add manually</b><small>Type it in</small></span></button>`);
+    <button class="action" data-a="manual"><span>✏️</span><span><b>Add manually</b><small>Type it in</small></span></button>`, { title: 'Add items' });
   s.el.querySelectorAll<HTMLElement>('[data-a]').forEach(b => b.onclick = () => {
     s.close();
     ({ barcode: barcodeFlow, receipt: receiptFlow, manual: () => editItem(null, {}, false, 'menu') } as any)[b.dataset.a!]();
@@ -336,25 +417,76 @@ async function barcodeFlow() {
   editItem(null, { name, brand: p?.brand, image: p?.image, barcode: code, categoryId: catId, location: defaultLocation(catId), price: paid }, true, 'barcode');
 }
 
+const MAX_RECEIPT_PARTS = 6;
+function collectReceiptParts(initial: Blob[]): Promise<Blob[] | null> {
+  const parts = [...initial];
+  const urls: string[] = [];
+  const urlFor = (b: Blob) => { const u = URL.createObjectURL(b); urls.push(u); return u; };
+  const revoke = () => { for (const u of urls) URL.revokeObjectURL(u); urls.length = 0; };
+  return new Promise(resolve => {
+    let settled = false;
+    const s = sheet(`<p class="muted">Long receipts: photograph from top to bottom, overlapping slightly. Up to ${MAX_RECEIPT_PARTS} parts.</p>
+      <div id="rp-body"></div>
+      <div class="sheet-foot" id="rp-foot"></div>`, { title: 'Receipt photos', full: true, beforeClose: () => { finish(null); return true; } });
+    const finish = (v: Blob[] | null) => {
+      if (settled) return;
+      settled = true;
+      revoke();
+      resolve(v);
+    };
+    const paint = () => {
+      $('#rp-body', s.el).innerHTML = `<ul class="receipt-parts">${parts.map((b, i) => `<li>
+        <img src="${urlFor(b)}" alt="Part ${i + 1}">
+        <div class="rp-meta"><div class="name">Part ${i + 1}</div>
+          <button type="button" class="btn ghost" data-remove="${i}">Remove</button></div></li>`).join('')}</ul>`;
+      $('#rp-foot', s.el).innerHTML = `${parts.length < MAX_RECEIPT_PARTS ? '<button type="button" class="btn tonal" id="rp-add">Add another part</button>' : ''}
+        <button type="button" class="btn primary" id="rp-done" ${parts.length ? '' : 'disabled'}>Done, read receipt</button>`;
+      s.el.querySelectorAll<HTMLElement>('[data-remove]').forEach(b => b.onclick = () => {
+        parts.splice(+b.dataset.remove!, 1);
+        revoke();
+        paint();
+      });
+      $('#rp-add', s.el)?.addEventListener('click', async () => {
+        if (parts.length >= MAX_RECEIPT_PARTS) return;
+        const n = parts.length + 1;
+        const blob = await (await scanner()).capturePhoto('Scan receipt', `Part ${n} of ${MAX_RECEIPT_PARTS} — overlap slightly with the last photo`);
+        if (!blob) return;
+        parts.push(blob);
+        revoke();
+        paint();
+      });
+      $('#rp-done', s.el).onclick = () => {
+        if (!parts.length) return;
+        const out = [...parts];
+        s.close();
+        finish(out);
+      };
+    };
+    paint();
+  });
+}
+
 async function receiptFlow() {
   if (!hasKey(S.settings)) { toast('Add your AI key in Settings to scan receipts'); S.tab = 'settings'; render(); return; }
-  const blob = await (await scanner()).capturePhoto('Scan receipt', 'Fit the whole receipt in view, flat and well lit');
-  if (!blob) return;
-  const done = busy('Reading receipt…');
+  const first = await (await scanner()).capturePhoto('Scan receipt', 'Photograph the top of the receipt, flat and well lit. You can add more parts next.');
+  if (!first) return;
+  const parts = await collectReceiptParts([first]);
+  if (!parts?.length) return;
+  const done = busy(parts.length > 1 ? `Reading ${parts.length} receipt parts…` : 'Reading receipt…');
   let lines;
-  try { lines = await extractReceipt(S.settings, await fileToJpeg(blob, 2000), S.cats); }
+  try { lines = await extractReceipt(S.settings, await Promise.all(parts.map(b => fileToJpeg(b, 1600, 0.85))), S.cats); }
   catch (e: any) { done(); return alert(e.message); }
   done();
   if (!lines.length) return toast('No items found on that receipt');
   const catOpts = (sel: string) => S.cats.map(c => `<option value="${c.id}" ${c.id === sel ? 'selected' : ''}>${c.icon} ${esc(c.name)}</option>`).join('');
-  const s = sheet(`<h2>Review receipt</h2><p class="muted">Untick anything you don't want. Tap a name to edit it.</p>
+  const s = sheet(`<p class="muted">Untick anything you don't want. Tap a name to edit it.</p>
     <ul class="review">${lines.map((l, n) => `<li data-n="${n}">
       <input type="checkbox" checked aria-label="Include">
       <div class="rv-main"><input class="rv-name" value="${esc(l.name)}"><div class="rv-sub">
         <select class="rv-cat">${catOpts(l.categoryId)}</select>
         <input class="rv-qty" type="number" min="1" inputmode="numeric" value="${l.quantity}" aria-label="Quantity">
         <input class="rv-price" type="number" min="0" step="0.01" inputmode="decimal" value="${l.price ?? ''}" placeholder="$" aria-label="Line price"></div></div></li>`).join('')}</ul>
-    <div class="sheet-foot"><button class="btn ghost" data-close>Cancel</button><button class="btn primary" id="rv-add">Add items</button></div>`, { full: true });
+    <div class="sheet-foot"><button class="btn ghost" data-close>Cancel</button><button class="btn primary" id="rv-add">Add items</button></div>`, { full: true, title: 'Review receipt' });
   $('#rv-add', s.el).onclick = async () => {
     let n = 0;
     for (const li of s.el.querySelectorAll<HTMLElement>('.review li')) {
@@ -387,8 +519,9 @@ async function saveItem(i: Item) {
 function editItem(existing: Item | null, prefill: Partial<Item> = {}, autoCat = false, nextAdd: 'barcode' | 'menu' | null = null) {
   const it: Item = existing ? { ...existing } : { ...blank(), ...prefill };
   let catTouched = !!existing || (!!prefill.categoryId && !autoCat);
+  let dirty = false;
+  const markDirty = () => { dirty = true; };
   const s = sheet(`
-    <div class="ed-head">${it.image ? `<img class="ed-img" src="${esc(it.image)}" alt="">` : ''}<h2>${existing ? 'Edit item' : 'New item'}</h2></div>
     ${existing ? `<div class="finish"><button class="btn used" id="e-used">✅ Used it</button><button class="btn binned" id="e-binned">🗑️ Binned it</button></div>` : ''}
     <label class="field"><span>Name</span><input id="e-name" value="${esc(it.name)}" placeholder="e.g. Greek yoghurt" autocomplete="off"></label>
     <label class="field"><span>Expiry date</span>
@@ -404,7 +537,7 @@ function editItem(existing: Item | null, prefill: Partial<Item> = {}, autoCat = 
       <label class="field"><span>Opened on</span><input id="e-open" type="date" value="${it.opened ?? ''}"></label>
       <label class="field"><span>Brand</span><input id="e-brand" value="${esc(it.brand ?? '')}"></label>${it.barcode ? `<p class="muted">Barcode ${esc(it.barcode)}</p>` : ''}
     </details>
-    <div class="sheet-foot">${existing ? '<button class="btn ghost danger" id="e-del">Delete</button>' : '<button class="btn ghost" data-close>Cancel</button>'}<button class="btn primary" id="e-save">Save</button></div>`, { full: true });
+    <div class="sheet-foot">${existing ? '<button class="btn ghost danger" id="e-del">Delete</button>' : '<button class="btn ghost" data-close>Cancel</button>'}<button class="btn primary" id="e-save">Save</button></div>`, { full: true, title: existing ? 'Edit item' : 'New item', lead: it.image, beforeClose: async () => !dirty || await askDiscard() });
   const el = s.el;
   if (!existing) {
     const paid = it.price ?? lastPaid({ barcode: it.barcode, name: it.name });
@@ -413,10 +546,14 @@ function editItem(existing: Item | null, prefill: Partial<Item> = {}, autoCat = 
   }
   const setCat = (id: string) => { it.categoryId = id; el.querySelectorAll<HTMLElement>('[data-c]').forEach(b => b.classList.toggle('on', b.dataset.c === id)); };
   const setLocFor = (id: string) => { if (existing) return; it.location = defaultLocation(id); el.querySelectorAll<HTMLElement>('[data-l]').forEach(x => x.classList.toggle('on', x.dataset.l === it.location)); };
-  el.querySelectorAll<HTMLElement>('[data-c]').forEach(b => b.onclick = () => { catTouched = true; setCat(b.dataset.c!); $('#e-cat-ai', el).textContent = ''; });
-  el.querySelectorAll<HTMLElement>('[data-l]').forEach(b => b.onclick = () => { it.location = b.dataset.l as Location; el.querySelectorAll<HTMLElement>('[data-l]').forEach(x => x.classList.toggle('on', x === b)); });
+  el.querySelectorAll<HTMLElement>('[data-c]').forEach(b => b.onclick = () => { catTouched = true; markDirty(); setCat(b.dataset.c!); $('#e-cat-ai', el).textContent = ''; });
+  el.querySelectorAll<HTMLElement>('[data-l]').forEach(b => b.onclick = () => { markDirty(); it.location = b.dataset.l as Location; el.querySelectorAll<HTMLElement>('[data-l]').forEach(x => x.classList.toggle('on', x === b)); });
   const qty = $<HTMLInputElement>('#e-qty', el);
-  el.querySelectorAll<HTMLElement>('[data-q]').forEach(b => b.onclick = () => { qty.value = String(Math.max(1, parseQty(qty.value) + +b.dataset.q!)); });
+  el.querySelectorAll<HTMLElement>('[data-q]').forEach(b => b.onclick = () => { markDirty(); qty.value = String(Math.max(1, parseQty(qty.value) + +b.dataset.q!)); });
+  el.querySelectorAll('input, select, textarea').forEach(n => {
+    n.addEventListener('input', markDirty);
+    n.addEventListener('change', markDirty);
+  });
 
   // Category auto-suggest: instant keyword guess, then AI if a key is set.
   const autoCategorise = async () => {
@@ -534,10 +671,13 @@ async function afterNewItem(item: Item, nextAdd: 'barcode' | 'menu' | null, alre
 }
 function offerScanExpiry(item: Item): Promise<'scanned' | 'skip' | 'done'> {
   return new Promise(resolve => {
-    const s = sheet(`<h2>Scan expiry?</h2>
-      <p>Add a date for <b>${esc(item.name)}</b>. You can keep adding while it reads in the background.</p>
-      <div class="sheet-foot"><button class="btn ghost" id="sx-skip">Not now</button><button class="btn primary" id="sx-scan">📷 Scan expiry</button></div>`);
     let settled = false;
+    const s = sheet(`
+      <p>Add a date for <b>${esc(item.name)}</b>. You can keep adding while it reads in the background.</p>
+      <div class="sheet-foot"><button class="btn ghost" id="sx-skip">Not now</button><button class="btn primary" id="sx-scan">📷 Scan expiry</button></div>`, {
+      title: 'Scan expiry?',
+      beforeClose: () => { if (!settled) { settled = true; resolve('done'); } return true; },
+    });
     const out = (v: 'scanned' | 'skip' | 'done') => { if (!settled) { settled = true; s.close(); resolve(v); } };
     $('#sx-skip', s.el).onclick = () => out('skip');
     $('#sx-scan', s.el).onclick = async () => {
@@ -546,7 +686,6 @@ function offerScanExpiry(item: Item): Promise<'scanned' | 'skip' | 'done'> {
       await startExpiryRead(item, blob);
       out('scanned');
     };
-    s.el.parentElement!.addEventListener('click', e => { if (e.target === s.el.parentElement) out('done'); });
   });
 }
 
@@ -622,7 +761,7 @@ async function resumeExpiryJobs() {
 }
 
 function openDatesSheet() {
-  const s = sheet(`<div id="dates-body">${datesSheetHtml()}</div>`);
+  const s = sheet(`<div id="dates-body">${datesSheetHtml()}</div>`, { title: 'Dates to check', full: true });
   const paint = () => {
     if (!datesToCheck().length) { s.close(); render(); return; }
     $('#dates-body', s.el).innerHTML = datesSheetHtml();
@@ -658,8 +797,7 @@ function openDatesSheet() {
 }
 function datesSheetHtml() {
   const rows = datesToCheck();
-  return `<h2>Dates to check</h2>
-    <p class="muted">These dates are not final until you confirm them.</p>
+  return `<p class="muted">These dates are not final until you confirm them.</p>
     <ul class="dates-list">${rows.map(i => {
       const c = catOf(i.categoryId);
       const ok = i.expiryStatus === 'pending' && i.expiry;
@@ -806,10 +944,10 @@ function bindSettings() {
   });
   $('#s-addcat').onclick = () => {
     let icon = ICON_CHOICES[0];
-    const s = sheet(`<h2>New category</h2><label class="field"><span>Name</span><input id="c-name" placeholder="e.g. Baby food"></label>
+    const s = sheet(`<label class="field"><span>Name</span><input id="c-name" placeholder="e.g. Baby food"></label>
       <div class="field"><span>Icon</span><div class="icons">${ICON_CHOICES.map((i, n) => `<button class="${n ? '' : 'on'}" data-i="${i}">${i}</button>`).join('')}</div>
       <input id="c-custom" placeholder="…or type any emoji" maxlength="4"></div>
-      <div class="sheet-foot"><button class="btn ghost" data-close>Cancel</button><button class="btn primary" id="c-save">Add</button></div>`);
+      <div class="sheet-foot"><button class="btn ghost" data-close>Cancel</button><button class="btn primary" id="c-save">Add</button></div>`, { title: 'New category' });
     s.el.querySelectorAll<HTMLElement>('[data-i]').forEach(b => b.onclick = () => { icon = b.dataset.i!; s.el.querySelectorAll('[data-i]').forEach(x => x.classList.toggle('on', x === b)); });
     $('#c-save', s.el).onclick = async () => {
       const name = $<HTMLInputElement>('#c-name', s.el).value.trim(); if (!name) return toast('Give it a name');
@@ -855,6 +993,7 @@ async function checkReminders(force = false) {
   const shot = params.get('shot');
   if (shot === 'reading' || shot === 'dates') await seedShot(shot);
   render();
+  if (shot === 'receipt-parts') void showReceiptPartsShot();
   checkReminders();
   document.addEventListener('visibilitychange', () => { if (document.visibilityState === 'visible') { render(); checkReminders(); } });
   if ('serviceWorker' in navigator && location.protocol !== 'file:') navigator.serviceWorker.register('sw.js').catch(() => {});
@@ -887,6 +1026,29 @@ async function seedDemo() {
   const used: WasteEvent = { id: db.uid(), name: 'Full Cream Milk 2L', categoryId: 'dairy', type: 'used', at: Date.now() - 5 * 864e5, unitPrice: 3.2, quantity: 1 };
   await db.put('events', used); S.events.push(used);
   const si: ShopItem = { id: db.uid(), name: 'Eggs', done: false, addedAt: Date.now() }; await db.put('shopping', si); S.shop.push(si);
+}
+
+async function fakeReceiptPart(label: string, lines: string[]): Promise<Blob> {
+  const c = document.createElement('canvas');
+  c.width = 480; c.height = 640;
+  const g = c.getContext('2d')!;
+  g.fillStyle = '#f7f4ee'; g.fillRect(0, 0, 480, 640);
+  g.fillStyle = '#111';
+  g.font = 'bold 22px ui-monospace, monospace';
+  g.fillText('WOOLWORTHS', 40, 48);
+  g.font = '15px ui-monospace, monospace';
+  g.fillText(label, 40, 78);
+  lines.forEach((line, i) => g.fillText(line, 40, 130 + i * 28));
+  return new Promise((res, rej) => c.toBlob(b => b ? res(b) : rej(new Error('blob')), 'image/jpeg', 0.85));
+}
+async function showReceiptPartsShot() {
+  if (!S.items.length) { await seedDemo(); render(); }
+  const parts = await Promise.all([
+    fakeReceiptPart('Part 1 of 3', ['Milk 2L            3.20', 'Greek Yoghurt      5.50', 'Baby Spinach       3.00']),
+    fakeReceiptPart('Part 2 of 3', ['Baby Spinach       3.00', 'Chicken Thighs     8.50', 'Sourdough          6.00']),
+    fakeReceiptPart('Part 3 of 3', ['Sourdough          6.00', 'Frozen Peas        3.80', 'Tim Tams           4.50']),
+  ]);
+  collectReceiptParts(parts);
 }
 
 /** ?demo&shot=reading|dates sets sample expiry-read states for screenshots. */
