@@ -20,11 +20,14 @@ export const ICON_CHOICES = ['🥛','🧀','🥚','🥩','🍗','🐟','🦐','�
 
 /** Offline keyword rules: used when there is no AI key, and as an instant first guess. */
 const RULES: [string, RegExp][] = [
-  ['dairy', /milk|cheese|yog(h)?urt|butter|cream|feta|parmesan|mozzarella|cheddar|custard|kefir|egg/i],
-  ['meat', /chicken|beef|pork|lamb|mince|steak|sausage|bacon|ham|salami|fish|salmon|tuna steak|prawn|shrimp|turkey|seafood/i],
+  // Checked in order: specific phrases and Frozen first so "peanut butter" isn't Dairy and "frozen chicken" isn't Meat.
+  ['condiments', /peanut butter/i],
+  ['canned', /coconut (milk|cream)/i],
   ['frozen', /frozen|ice ?cream|peas froz|nugget|fish finger/i],
+  ['dairy', /milk|cheese|yog(h)?urt|butter|cream|feta|parmesan|mozzarella|cheddar|custard|kefir|\beggs?\b/i],
+  ['meat', /chicken|beef|pork|lamb|mince|steak|sausage|bacon|\bham\b|salami|fish|salmon|tuna steak|prawn|shrimp|turkey|seafood/i],
   ['produce', /apple|banana|orange|lettuce|tomato|potato|onion|carrot|broccoli|spinach|avocado|berr(y|ies)|grape|lemon|lime|cucumber|capsicum|mushroom|garlic|ginger|fruit|veg|herb|salad/i],
-  ['bakery', /bread|loaf|roll|bun|croissant|muffin|bagel|wrap|tortilla|pita|cake|sourdough/i],
+  ['bakery', /bread|loaf|\brolls?\b|\bbuns?\b|croissant|muffin|bagel|wrap|tortilla|pita|cake|sourdough/i],
   ['canned', /\bcan(ned)?\b|tinned|baked beans|chickpea|tuna|coconut milk|diced tomato/i],
   ['condiments', /sauce|ketchup|mayo|mustard|vinegar|dressing|jam|honey|vegemite|peanut butter|syrup|relish|soy|chutney|pesto/i],
   ['spices', /spice|pepper|salt|cumin|paprika|cinnamon|oregano|turmeric|curry powder|chilli flakes|seasoning|stock cube/i],

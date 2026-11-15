@@ -25,8 +25,10 @@ const localDate = (iso: string) => { const [y, m, d] = iso.split('-').map(Number
 const catOf = (id: string) => S.cats.find(c => c.id === id) ?? { id: 'other', name: 'Other', icon: '📦' };
 const active = () => S.items.filter(i => i.status === 'active');
 const money = (n: number) => new Intl.NumberFormat('en-AU', { style: 'currency', currency: 'AUD' }).format(n);
+const parseQty = (v: string) => Math.max(1, Math.round(+v || 1));
 const parseMoney = (v: string) => {
-  const n = parseFloat(v.replace(/[^0-9.]/g, ''));
+  const t = v.replace(/[$,\s]/g, '');
+  const n = t ? Number(t) : NaN;
   return Number.isFinite(n) && n >= 0 ? Math.round(n * 100) / 100 : undefined;
 };
 function lastPaid(opts: { barcode?: string; name?: string }): number | undefined {
@@ -38,9 +40,9 @@ function lastPaid(opts: { barcode?: string; name?: string }): number | undefined
   if (code) { const hit = items.find(i => i.barcode === code); if (hit) return hit.price; }
   if (name) { const hit = items.find(i => i.name.toLowerCase() === name); if (hit) return hit.price; }
 }
-async function recordPurchase(i: Item, quantity: number, unitPrice: number, at = Date.now()) {
+async function recordPurchase(i: Item, quantity: number, unitPrice: number, at = Date.now(), total?: number) {
   if (!(unitPrice > 0) || quantity <= 0) return;
-  const p: Purchase = { id: db.uid(), itemId: i.id, name: i.name, barcode: i.barcode, categoryId: i.categoryId, unitPrice, quantity, total: Math.round(unitPrice * quantity * 100) / 100, at };
+  const p: Purchase = { id: db.uid(), itemId: i.id, name: i.name, barcode: i.barcode, categoryId: i.categoryId, unitPrice, quantity, total: total ?? Math.round(unitPrice * quantity * 100) / 100, at };
   await db.put('purchases', p); S.purchases.push(p);
 }
 
@@ -331,7 +333,7 @@ async function barcodeFlow() {
   const name = p ? [p.name, p.quantity].filter(Boolean).join(' ') : '';
   const catId = name ? guessCategory(`${name} ${p?.categoriesText ?? ''}`) : 'other';
   const paid = lastPaid({ barcode: code, name });
-  editItem(null, { name, brand: p?.brand, image: p?.image, barcode: code, categoryId: catId, location: defaultLocation(catId), price: paid }, !!name, 'barcode');
+  editItem(null, { name, brand: p?.brand, image: p?.image, barcode: code, categoryId: catId, location: defaultLocation(catId), price: paid }, true, 'barcode');
 }
 
 async function receiptFlow() {
@@ -359,12 +361,12 @@ async function receiptFlow() {
       if (!$<HTMLInputElement>('input[type=checkbox]', li).checked) continue;
       const name = $<HTMLInputElement>('.rv-name', li).value.trim(); if (!name) continue;
       const categoryId = $<HTMLSelectElement>('.rv-cat', li).value;
-      const quantity = Math.max(1, +$<HTMLInputElement>('.rv-qty', li).value || 1);
+      const quantity = parseQty($<HTMLInputElement>('.rv-qty', li).value);
       const linePrice = parseMoney($<HTMLInputElement>('.rv-price', li).value);
       const price = linePrice != null ? Math.round(linePrice / quantity * 100) / 100 : undefined;
       const it = { ...blank(), name, categoryId, location: defaultLocation(categoryId), quantity, price };
       await saveItem(it);
-      if (price) await recordPurchase(it, quantity, price);
+      if (price) await recordPurchase(it, quantity, price, Date.now(), linePrice);
       n++;
     }
     s.close(); S.tab = 'items'; render(); toast(`Added ${n} item${n === 1 ? '' : 's'}. Tap one to add its expiry.`);
@@ -410,21 +412,22 @@ function editItem(existing: Item | null, prefill: Partial<Item> = {}, autoCat = 
     if (paid != null && it.price === paid) $('#e-price-note', el).textContent = `Last paid ${money(paid)}`;
   }
   const setCat = (id: string) => { it.categoryId = id; el.querySelectorAll<HTMLElement>('[data-c]').forEach(b => b.classList.toggle('on', b.dataset.c === id)); };
+  const setLocFor = (id: string) => { if (existing) return; it.location = defaultLocation(id); el.querySelectorAll<HTMLElement>('[data-l]').forEach(x => x.classList.toggle('on', x.dataset.l === it.location)); };
   el.querySelectorAll<HTMLElement>('[data-c]').forEach(b => b.onclick = () => { catTouched = true; setCat(b.dataset.c!); $('#e-cat-ai', el).textContent = ''; });
   el.querySelectorAll<HTMLElement>('[data-l]').forEach(b => b.onclick = () => { it.location = b.dataset.l as Location; el.querySelectorAll<HTMLElement>('[data-l]').forEach(x => x.classList.toggle('on', x === b)); });
   const qty = $<HTMLInputElement>('#e-qty', el);
-  el.querySelectorAll<HTMLElement>('[data-q]').forEach(b => b.onclick = () => { qty.value = String(Math.max(1, (+qty.value || 1) + +b.dataset.q!)); });
+  el.querySelectorAll<HTMLElement>('[data-q]').forEach(b => b.onclick = () => { qty.value = String(Math.max(1, parseQty(qty.value) + +b.dataset.q!)); });
 
   // Category auto-suggest: instant keyword guess, then AI if a key is set.
   const autoCategorise = async () => {
     const name = $<HTMLInputElement>('#e-name', el).value.trim();
     if (!name || catTouched) return;
-    const g = guessCategory(name); setCat(g);
+    const g = guessCategory(name); if (g !== 'other') { setCat(g); setLocFor(g); }
     if (!hasKey(S.settings)) return;
     $('#e-cat-ai', el).textContent = '· AI thinking…';
     try {
       const id = await suggestCategory(S.settings, name, S.cats);
-      if (id && !catTouched) { setCat(id); $('#e-cat-ai', el).textContent = '· suggested by AI'; if (!existing) { it.location = defaultLocation(id); el.querySelectorAll<HTMLElement>('[data-l]').forEach(x => x.classList.toggle('on', x.dataset.l === it.location)); } }
+      if (id && !catTouched) { setCat(id); setLocFor(id); $('#e-cat-ai', el).textContent = '· suggested by AI'; }
       else $('#e-cat-ai', el).textContent = '';
     } catch { $('#e-cat-ai', el).textContent = ''; }
   };
@@ -433,12 +436,14 @@ function editItem(existing: Item | null, prefill: Partial<Item> = {}, autoCat = 
   $('#e-exp', el).addEventListener('change', () => { it.expiryMonthOnly = false; it.expiryStatus = undefined; it.expiryRaw = undefined; $('#e-exp-note', el).textContent = ''; });
 
   const readForm = () => {
+    const live = existing && S.items.find(x => x.id === it.id);
+    if (live) { it.expiry = live.expiry; it.expiryMonthOnly = live.expiryMonthOnly; it.expiryRaw = live.expiryRaw; it.expiryStatus = live.expiryStatus; }
     it.name = $<HTMLInputElement>('#e-name', el).value.trim();
     const typed = $<HTMLInputElement>('#e-exp', el).value || undefined;
     if (typed) { it.expiry = typed; it.expiryStatus = undefined; it.expiryRaw = undefined; }
     else if (it.expiryStatus !== 'reading' && it.expiryStatus !== 'pending') { it.expiry = undefined; }
     it.opened = $<HTMLInputElement>('#e-open', el).value || undefined;
-    it.quantity = Math.max(1, +qty.value || 1);
+    it.quantity = parseQty(qty.value);
     it.price = parseMoney($<HTMLInputElement>('#e-price', el).value);
     it.brand = $<HTMLInputElement>('#e-brand', el).value.trim() || undefined;
   };
@@ -470,7 +475,7 @@ function editItem(existing: Item | null, prefill: Partial<Item> = {}, autoCat = 
   const finish = async (type: 'used' | 'binned') => {
     const ev: WasteEvent = { id: db.uid(), name: existing!.name, categoryId: existing!.categoryId, type, at: Date.now(), unitPrice: existing!.price, quantity: 1 };
     await db.put('events', ev); S.events.push(ev);
-    const cur = { ...existing! };
+    const cur = { ...(S.items.find(x => x.id === existing!.id) ?? existing!) };
     if (cur.quantity > 1) { cur.quantity--; await saveItem(cur); toast(`${type === 'used' ? 'Used' : 'Binned'} one. ${cur.quantity} left.`); }
     else {
       cur.status = type; cur.finishedAt = Date.now(); await cancelExpiryJobs(cur.id); await saveItem(cur);
@@ -560,6 +565,7 @@ async function readExpiryPhoto(blob: Blob): Promise<{ iso: string | null; monthO
   return { iso, monthOnly, raw };
 }
 function isTransient(e: unknown) {
+  if ([408, 429, 500, 502, 503, 504].includes((e as any)?.status)) return true;
   return /fail(ed)? to fetch|network|timeout|429|500|502|503|504|unavailable|overloaded|rate.?limit|temporar|offline|abort/i.test(String((e as any)?.message ?? e ?? ''));
 }
 
@@ -717,7 +723,7 @@ function statsView() {
   const top = Object.entries(S.events.filter(e => e.type === 'binned').reduce<Record<string, number>>((m, e) => (m[e.name] = (m[e.name] ?? 0) + 1, m), {})).sort((a, b) => b[1] - a[1]).slice(0, 5);
   const a = active();
   const week = spendSince(startOfWeek()), month = spendSince(startOfMonth());
-  const byCat = Object.entries(S.purchases.filter(p => p.at >= startOfMonth()).reduce<Record<string, number>>((m, p) => (m[p.categoryId] = (m[p.categoryId] ?? 0) + p.total, m), {})).sort((x, y) => y[1] - x[1]);
+  const byCat = Object.entries(S.purchases.filter(p => p.at >= startOfMonth()).reduce<Record<string, number>>((m, p) => { const k = catOf(p.categoryId).id; m[k] = (m[k] ?? 0) + p.total; return m; }, {})).sort((x, y) => y[1] - x[1]);
   const catMax = byCat[0]?.[1] ?? 0;
   const wasted = S.events.filter(e => e.type === 'binned' && e.at >= startOfMonth()).reduce((s, e) => s + (e.unitPrice ?? 0) * (e.quantity ?? 1), 0);
   return `<header class="hdr"><h1>Stats</h1></header>
@@ -820,7 +826,7 @@ function bindSettings() {
   $<HTMLInputElement>('#s-import').addEventListener('change', async e => {
     const f = (e.target as HTMLInputElement).files?.[0]; if (!f) return;
     if (!confirm('Replace everything in the app with this backup?')) return;
-    try { await db.importData(JSON.parse(await f.text())); await load(); render(); toast('Backup restored'); } catch (err: any) { alert(err.message); }
+    try { await db.importData(JSON.parse(await f.text())); await load(); await resumeExpiryJobs(); render(); toast('Backup restored'); } catch (err: any) { alert(err.message); }
   });
 }
 

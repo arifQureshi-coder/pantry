@@ -30,12 +30,17 @@ function parseJSON(text: string) {
   }
 }
 
+function httpError(msg: string, status: number) {
+  const e = new Error(status === 429 ? `${msg} (rate limit: wait a minute and try again)` : msg) as Error & { status: number };
+  e.status = status; return e;
+}
+
 async function callGemini(s: Settings, prompt: string, imageDataUrl?: string) {
   const parts: any[] = [{ text: prompt }];
   if (imageDataUrl) parts.push({ inline_data: { mime_type: 'image/jpeg', data: imageDataUrl.split(',')[1] } });
   const body = JSON.stringify({ contents: [{ role: 'user', parts }], generationConfig: { temperature: 0, responseMimeType: 'application/json' } });
   const models = [s.geminiModel, ...GEMINI_FALLBACK_MODELS.filter(m => m !== s.geminiModel)];
-  let lastErr = '';
+  let lastErr = '', lastStatus = 0;
   for (const model of models) {
     const r = await fetch(`https://generativelanguage.googleapis.com/v1beta/models/${encodeURIComponent(model)}:generateContent`, {
       method: 'POST', headers: { 'Content-Type': 'application/json', 'x-goog-api-key': s.geminiKey }, body,
@@ -47,11 +52,11 @@ async function callGemini(s: Settings, prompt: string, imageDataUrl?: string) {
       return parseJSON(text);
     }
     const err = await r.json().catch(() => ({}));
-    lastErr = err?.error?.message || `HTTP ${r.status}`;
+    lastErr = err?.error?.message || `HTTP ${r.status}`; lastStatus = r.status;
     // Only try the next model if this one is unknown/retired; key or quota errors are final.
     if (r.status !== 404 && !/not found|not supported|deprecated/i.test(lastErr)) break;
   }
-  throw new Error('Gemini: ' + lastErr);
+  throw httpError('Gemini: ' + lastErr, lastStatus);
 }
 
 async function callOpenAI(s: Settings, prompt: string, imageDataUrl?: string) {
@@ -63,7 +68,7 @@ async function callOpenAI(s: Settings, prompt: string, imageDataUrl?: string) {
     body: JSON.stringify({ model: s.openaiModel || 'gpt-4o-mini', temperature: 0, response_format: { type: 'json_object' }, messages: [{ role: 'user', content }] }),
   });
   const j = await r.json().catch(() => ({}));
-  if (!r.ok) throw new Error('OpenAI: ' + (j?.error?.message || `HTTP ${r.status}`));
+  if (!r.ok) throw httpError('OpenAI: ' + (j?.error?.message || `HTTP ${r.status}`), r.status);
   return parseJSON(j.choices?.[0]?.message?.content ?? '');
 }
 
@@ -98,7 +103,8 @@ Return JSON only: {"items":[{"name":string,"quantity":number,"categoryId":string
 
 export interface ExpiryRead { raw: string; date: string | null; monthOnly: boolean; }
 export async function readExpiry(s: Settings, image: string): Promise<ExpiryRead> {
-  const today = new Date().toISOString().slice(0, 10);
+  const d = new Date(); // local (Sydney) date, not UTC: toISOString() is yesterday before 11am AEDT
+  const today = `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
   const prompt = `This photo shows part of a food package. Find the expiry, use-by or best-before date (labels like BB, BBE, Best Before, Use By, EXP, Display Until).
 If several dates are shown, prefer Use By / Best Before over packed-on or manufactured dates.
 Dates are Australian: numeric dates are DAY/MONTH order (12/03/26 = 12 March 2026). Two numbers like "03/26" mean MONTH/YEAR (month only).

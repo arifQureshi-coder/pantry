@@ -1,10 +1,19 @@
 // Offline support: cache the app shell, serve same-origin files cache-first and update in the background.
 // API calls (Open Food Facts, Gemini, OpenAI) always go to the network.
-const CACHE = 'pantry-v4';
+const CACHE = 'pantry-v5';
 const SHELL = ['./', './index.html', './manifest.webmanifest', './icons/icon-192.png', './icons/apple-touch-icon.png'];
 
+// The JS/CSS bundles have hashed names, so read them from index.html and cache them too.
+// Without this the app opened offline as a blank page once the browser's HTTP cache expired.
+async function precache() {
+  const c = await caches.open(CACHE);
+  await c.addAll(SHELL);
+  const html = await (await c.match('./index.html')).text();
+  const assets = [...html.matchAll(/(?:src|href)="\.?\/?(assets\/[^"]+)"/g)].map(m => './' + m[1]);
+  await c.addAll(assets);
+}
 self.addEventListener('install', e => {
-  e.waitUntil(caches.open(CACHE).then(c => c.addAll(SHELL)).then(() => self.skipWaiting()));
+  e.waitUntil(precache().then(() => self.skipWaiting()));
 });
 self.addEventListener('activate', e => {
   e.waitUntil(caches.keys().then(keys => Promise.all(keys.filter(k => k !== CACHE).map(k => caches.delete(k)))).then(() => self.clients.claim()));
