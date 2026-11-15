@@ -10,7 +10,7 @@ const scanner = () => import('./scanner');
 
 // ---------- state ----------
 type Tab = 'items' | 'shopping' | 'stats' | 'settings';
-type StatusFilter = 'all' | 'soon' | 'expired' | 'fresh' | 'none' | 'attention';
+type StatusFilter = 'all' | 'soon' | 'expired' | 'fresh' | 'none' | 'attention' | 'noexpiry';
 const S = {
   tab: 'items' as Tab,
   items: [] as Item[], cats: [] as Category[], shop: [] as ShopItem[], events: [] as WasteEvent[], purchases: [] as Purchase[],
@@ -54,11 +54,12 @@ async function load() {
 // ---------- expiry helpers ----------
 type Fresh = 'fresh' | 'soon' | 'expired' | 'none';
 function freshness(i: Item): Fresh {
-  if (!i.expiry || i.expiryStatus === 'reading' || i.expiryStatus === 'failed') return 'none';
+  if (i.noExpiry || !i.expiry || i.expiryStatus === 'reading' || i.expiryStatus === 'failed') return 'none';
   const d = daysUntil(i.expiry);
   return d < 0 ? 'expired' : d <= S.settings.leadDays ? 'soon' : 'fresh';
 }
 function dateLabel(i: Item) {
+  if (i.noExpiry) return '— No expiry';
   if (!i.expiry) return 'No date';
   const d = daysUntil(i.expiry);
   if (d < 0) return d === -1 ? 'Expired yesterday' : `Expired ${-d}d ago`;
@@ -68,13 +69,14 @@ function dateLabel(i: Item) {
   return i.expiryMonthOnly ? localDate(i.expiry).toLocaleDateString('en-AU', { month: 'short', year: 'numeric' }) : formatDate(i.expiry);
 }
 function expiryLabel(i: Item) {
+  if (i.noExpiry) return '— No expiry';
   if (i.expiryStatus === 'reading') return 'Reading…';
   if (i.expiryStatus === 'failed') return "Couldn't read, tap to enter";
   if (i.expiryStatus === 'pending' && i.expiry) return dateLabel(i) + '?';
   return dateLabel(i);
 }
-const isFinalDate = (i: Item) => !!i.expiry && !i.expiryStatus;
-const datesToCheck = () => active().filter(i => i.expiryStatus === 'pending' || i.expiryStatus === 'failed').sort((a, b) => (a.expiry ?? '9999').localeCompare(b.expiry ?? '9999'));
+const isFinalDate = (i: Item) => !i.noExpiry && !!i.expiry && !i.expiryStatus;
+const datesToCheck = () => active().filter(i => !i.noExpiry && (i.expiryStatus === 'pending' || i.expiryStatus === 'failed')).sort((a, b) => (a.expiry ?? '9999').localeCompare(b.expiry ?? '9999'));
 const expiringSoon = () => active().filter(i => isFinalDate(i) && ['soon', 'expired'].includes(freshness(i))).sort((a, b) => a.expiry!.localeCompare(b.expiry!));
 
 // ---------- toast / sheet ----------
@@ -249,6 +251,7 @@ function emptyState() {
     expired: { icon: '⚠️', title: 'No expired items', body: 'Nothing in your pantry is past its date.' },
     fresh: { icon: '✨', title: 'No fresh items', body: 'Nothing currently matches this filter.' },
     none: { icon: '📅', title: 'No items without a date', body: 'Every item here has an expiry date.' },
+    noexpiry: { icon: '➖', title: 'No items marked no expiry', body: 'Nothing is marked as not expiring.' },
     attention: { icon: '✅', title: 'Nothing needs attention', body: 'No items are expired or expiring soon.' },
   };
   const m = copy[S.status];
@@ -257,13 +260,14 @@ function emptyState() {
 }
 function itemRow(i: Item) {
   const c = catOf(i.categoryId); const f = freshness(i);
-  const pill = i.expiryStatus === 'reading' ? 'reading' : i.expiryStatus === 'failed' ? 'failed' : f + (i.expiryStatus === 'pending' ? ' pending' : '');
-  const body = i.expiryStatus === 'reading'
+  const pill = i.noExpiry ? 'noexpiry' : i.expiryStatus === 'reading' ? 'reading' : i.expiryStatus === 'failed' ? 'failed' : f + (i.expiryStatus === 'pending' ? ' pending' : '');
+  const body = i.expiryStatus === 'reading' && !i.noExpiry
     ? `<i class="spin-sm" aria-hidden="true"></i> Reading…`
     : esc(expiryLabel(i));
+  const bits = [c.name, i.location, i.quantity > 1 ? `×${i.quantity}` : '', i.opened ? 'opened' : ''].filter(Boolean);
   return `<li class="item" data-id="${i.id}">
     <div class="thumb">${i.image ? `<img src="${esc(i.image)}" alt="" loading="lazy" onerror="this.replaceWith(document.createTextNode('${c.icon}'))">` : c.icon}</div>
-    <div class="meta"><div class="name">${esc(i.name)}</div><div class="sub">${esc(i.location)}${i.quantity > 1 ? ` · ×${i.quantity}` : ''}${i.opened ? ' · opened' : ''}</div></div>
+    <div class="meta"><div class="name">${esc(i.name)}</div><div class="sub">${esc(bits.join(' · '))}</div></div>
     <span class="pill ${pill}">${body}</span></li>`;
 }
 const STATUS_CHIPS: [StatusFilter, string, string][] = [
@@ -272,9 +276,10 @@ const STATUS_CHIPS: [StatusFilter, string, string][] = [
   ['expired', 'Expired', 'expired'],
   ['fresh', 'Fresh', 'fresh'],
   ['none', 'No date', 'none'],
+  ['noexpiry', 'No expiry', 'none'],
 ];
 const STATUS_LABEL: Record<StatusFilter, string> = {
-  all: 'All', soon: 'Expiring soon', expired: 'Expired', fresh: 'Fresh', none: 'No date', attention: 'Needs attention',
+  all: 'All', soon: 'Expiring soon', expired: 'Expired', fresh: 'Fresh', none: 'No date', noexpiry: 'No expiry', attention: 'Needs attention',
 };
 type FilterSet = { status: StatusFilter; cat: string; loc: 'all' | Location; q: string };
 const currentFilters = (): FilterSet => ({ status: S.status, cat: S.cat, loc: S.loc, q: S.q });
@@ -289,6 +294,8 @@ function itemsMatching(over: Partial<FilterSet> = {}) {
     matchesStatus(i, f.status));
 }
 function matchesStatus(i: Item, status: StatusFilter = S.status) {
+  if (i.noExpiry) return status === 'all' || status === 'noexpiry';
+  if (status === 'noexpiry') return false;
   const f = freshness(i);
   if (status === 'all') return true;
   if (status === 'attention') return f === 'soon' || f === 'expired';
@@ -299,8 +306,8 @@ function statusOn(id: StatusFilter, status: StatusFilter = S.status) {
 }
 function statusCounts(f: FilterSet) {
   const list = itemsMatching({ ...f, status: 'all' });
-  const n = (fresh: Fresh) => list.filter(i => freshness(i) === fresh).length;
-  return { all: list.length, soon: n('soon'), expired: n('expired'), fresh: n('fresh'), none: n('none') };
+  const n = (fresh: Fresh) => list.filter(i => !i.noExpiry && freshness(i) === fresh).length;
+  return { all: list.length, soon: n('soon'), expired: n('expired'), fresh: n('fresh'), none: n('none'), noexpiry: list.filter(i => i.noExpiry).length };
 }
 function activeFilterChips() {
   const chips: { key: 'status' | 'cat' | 'loc'; label: string; cls: string }[] = [];
@@ -366,7 +373,7 @@ function filterSheetHtml(f: FilterSet) {
   return `
     <h3 class="filter-h">Status</h3>
     <div class="chips wrap">${STATUS_CHIPS.map(([id, label, cls]) =>
-      chip(statusOn(id, f.status), cls, `data-status="${id}"`, label, id === 'all' ? sc.all : sc[id as Fresh])).join('')}</div>
+      chip(statusOn(id, f.status), cls, `data-status="${id}"`, label, id === 'all' ? sc.all : id === 'noexpiry' ? sc.noexpiry : sc[id as Fresh])).join('')}</div>
     <h3 class="filter-h">Category</h3>
     <div class="chips wrap">${chip(f.cat === 'all', '', 'data-cat="all"', 'All', itemsMatching({ ...f, cat: 'all' }).length)}
       ${usedCats.map(c => chip(f.cat === c.id, '', `data-cat="${c.id}"`, `${c.icon} ${esc(c.name)}`, catCount(c.id))).join('')}</div>
@@ -507,9 +514,17 @@ async function receiptFlow() {
 
 const blank = (): Item => ({ id: db.uid(), name: '', categoryId: 'other', location: 'Pantry', quantity: 1, addedAt: Date.now(), status: 'active' });
 async function saveItem(i: Item) {
+  const prev = S.items.find(x => x.id === i.id);
+  const prevCat = prev?.categoryId;
   await db.put('items', i);
   const k = S.items.findIndex(x => x.id === i.id);
   if (k >= 0) S.items[k] = i; else S.items.push(i);
+  // Keep spend totals in the same category as the item the user picked.
+  if (prevCat && prevCat !== i.categoryId) {
+    for (const p of S.purchases.filter(x => x.itemId === i.id && x.categoryId === prevCat)) {
+      p.categoryId = i.categoryId; await db.put('purchases', p);
+    }
+  }
   // Bought it again: tick it off the shopping list
   const match = S.shop.find(s => !s.done && s.name.toLowerCase() === i.name.toLowerCase());
   if (match && k < 0) { match.done = true; await db.put('shopping', match); }
@@ -524,9 +539,10 @@ function editItem(existing: Item | null, prefill: Partial<Item> = {}, autoCat = 
   const s = sheet(`
     ${existing ? `<div class="finish"><button class="btn used" id="e-used">✅ Used it</button><button class="btn binned" id="e-binned">🗑️ Binned it</button></div>` : ''}
     <label class="field"><span>Name</span><input id="e-name" value="${esc(it.name)}" placeholder="e.g. Greek yoghurt" autocomplete="off"></label>
-    <label class="field"><span>Expiry date</span>
-      <div class="date-row"><input id="e-exp" type="date" value="${it.expiryStatus === 'reading' || it.expiryStatus === 'failed' ? '' : (it.expiry ?? '')}"><button class="btn tonal" id="e-scan">📷 Scan</button></div>
-      <small class="muted" id="e-exp-note">${expiryNote(it)}</small></label>
+    <div class="field"><span>Expiry date</span>
+      <div class="date-row"><input id="e-exp" type="date" value="${it.noExpiry || it.expiryStatus === 'reading' || it.expiryStatus === 'failed' ? '' : (it.expiry ?? '')}" ${it.noExpiry ? 'disabled' : ''}><button class="btn tonal" id="e-scan">📷 Scan</button><button type="button" class="btn ghost" id="e-clear">Clear</button></div>
+      <label class="toggle"><input type="checkbox" id="e-noexp" ${it.noExpiry ? 'checked' : ''}> No expiry</label>
+      <small class="muted" id="e-exp-note">${expiryNote(it)}</small></div>
     <div class="field"><span>Category <small class="muted" id="e-cat-ai"></small></span><div class="cat-pick" id="e-cats">${S.cats.map(c => `<button class="chip ${c.id === it.categoryId ? 'on' : ''}" data-c="${c.id}">${c.icon} ${esc(c.name)}</button>`).join('')}</div></div>
     <div class="field"><span>Stored in</span><div class="seg" id="e-loc">${(['Fridge', 'Freezer', 'Pantry'] as Location[]).map(l => `<button data-l="${l}" class="${it.location === l ? 'on' : ''}">${{ Fridge: '❄️', Freezer: '🧊', Pantry: '🗄️' }[l]} ${l}</button>`).join('')}</div></div>
     <div class="two">
@@ -544,7 +560,41 @@ function editItem(existing: Item | null, prefill: Partial<Item> = {}, autoCat = 
     if (it.price == null && paid != null) { it.price = paid; $<HTMLInputElement>('#e-price', el).value = String(paid); }
     if (paid != null && it.price === paid) $('#e-price-note', el).textContent = `Last paid ${money(paid)}`;
   }
-  const setCat = (id: string) => { it.categoryId = id; el.querySelectorAll<HTMLElement>('[data-c]').forEach(b => b.classList.toggle('on', b.dataset.c === id)); };
+  let noExpiryTouched = !!(existing || it.noExpiry || it.expiry);
+  let noExpirySuggested = !!(!existing && it.noExpiry);
+  const paintExpiry = () => {
+    const exp = $<HTMLInputElement>('#e-exp', el);
+    const tog = $<HTMLInputElement>('#e-noexp', el);
+    tog.checked = !!it.noExpiry;
+    exp.disabled = !!it.noExpiry;
+    if (it.noExpiry) exp.value = '';
+    $('#e-exp-note', el).textContent = expiryNote(it);
+  };
+  const clearDate = () => {
+    it.expiry = undefined; it.expiryMonthOnly = undefined; it.expiryRaw = undefined;
+    if (it.expiryStatus === 'reading' || it.expiryStatus === 'pending' || it.expiryStatus === 'failed') it.expiryStatus = undefined;
+    $<HTMLInputElement>('#e-exp', el).value = '';
+  };
+  const setNoExpiry = (on: boolean, suggested = false) => {
+    it.noExpiry = on || undefined;
+    if (on) {
+      clearDate();
+      if (existing) void cancelExpiryJobs(it.id);
+    }
+    if (!suggested) noExpiryTouched = true;
+    else noExpirySuggested = on;
+    paintExpiry();
+  };
+  const maybeSuggestNoExpiry = (id: string) => {
+    if (existing || noExpiryTouched || $<HTMLInputElement>('#e-exp', el).value) return;
+    if (id === 'household') setNoExpiry(true, true);
+    else if (noExpirySuggested) setNoExpiry(false, true);
+  };
+  const setCat = (id: string) => {
+    it.categoryId = id;
+    el.querySelectorAll<HTMLElement>('[data-c]').forEach(b => b.classList.toggle('on', b.dataset.c === id));
+    maybeSuggestNoExpiry(id);
+  };
   const setLocFor = (id: string) => { if (existing) return; it.location = defaultLocation(id); el.querySelectorAll<HTMLElement>('[data-l]').forEach(x => x.classList.toggle('on', x.dataset.l === it.location)); };
   el.querySelectorAll<HTMLElement>('[data-c]').forEach(b => b.onclick = () => { catTouched = true; markDirty(); setCat(b.dataset.c!); $('#e-cat-ai', el).textContent = ''; });
   el.querySelectorAll<HTMLElement>('[data-l]').forEach(b => b.onclick = () => { markDirty(); it.location = b.dataset.l as Location; el.querySelectorAll<HTMLElement>('[data-l]').forEach(x => x.classList.toggle('on', x === b)); });
@@ -570,15 +620,28 @@ function editItem(existing: Item | null, prefill: Partial<Item> = {}, autoCat = 
   };
   $('#e-name', el).addEventListener('change', autoCategorise);
   if (autoCat) autoCategorise();
-  $('#e-exp', el).addEventListener('change', () => { it.expiryMonthOnly = false; it.expiryStatus = undefined; it.expiryRaw = undefined; $('#e-exp-note', el).textContent = ''; });
+  if (!existing) maybeSuggestNoExpiry(it.categoryId);
+  $('#e-exp', el).addEventListener('change', () => {
+    it.expiryMonthOnly = false; it.expiryStatus = undefined; it.expiryRaw = undefined;
+    if ($<HTMLInputElement>('#e-exp', el).value) setNoExpiry(false);
+    else $('#e-exp-note', el).textContent = '';
+  });
+  $('#e-clear', el).onclick = () => { markDirty(); it.noExpiry = undefined; noExpiryTouched = true; noExpirySuggested = false; clearDate(); if (existing) void cancelExpiryJobs(it.id); paintExpiry(); };
+  $('#e-noexp', el).onchange = () => { markDirty(); setNoExpiry($<HTMLInputElement>('#e-noexp', el).checked); };
 
   const readForm = () => {
     const live = existing && S.items.find(x => x.id === it.id);
-    if (live) { it.expiry = live.expiry; it.expiryMonthOnly = live.expiryMonthOnly; it.expiryRaw = live.expiryRaw; it.expiryStatus = live.expiryStatus; }
+    if (live && !it.noExpiry) {
+      it.expiry = live.expiry; it.expiryMonthOnly = live.expiryMonthOnly; it.expiryRaw = live.expiryRaw; it.expiryStatus = live.expiryStatus; it.noExpiry = live.noExpiry;
+    }
     it.name = $<HTMLInputElement>('#e-name', el).value.trim();
-    const typed = $<HTMLInputElement>('#e-exp', el).value || undefined;
-    if (typed) { it.expiry = typed; it.expiryStatus = undefined; it.expiryRaw = undefined; }
-    else if (it.expiryStatus !== 'reading' && it.expiryStatus !== 'pending') { it.expiry = undefined; }
+    it.noExpiry = $<HTMLInputElement>('#e-noexp', el).checked || undefined;
+    if (it.noExpiry) { clearDate(); }
+    else {
+      const typed = $<HTMLInputElement>('#e-exp', el).value || undefined;
+      if (typed) { it.expiry = typed; it.expiryStatus = undefined; it.expiryRaw = undefined; it.noExpiry = undefined; }
+      else if (it.expiryStatus !== 'reading' && it.expiryStatus !== 'pending') { it.expiry = undefined; }
+    }
     it.opened = $<HTMLInputElement>('#e-open', el).value || undefined;
     it.quantity = parseQty(qty.value);
     it.price = parseMoney($<HTMLInputElement>('#e-price', el).value);
@@ -598,6 +661,7 @@ function editItem(existing: Item | null, prefill: Partial<Item> = {}, autoCat = 
     if (!it.name) { $<HTMLInputElement>('#e-name', el).focus(); return toast('Give it a name'); }
     if (it.expiry && it.expiryStatus !== 'pending') { it.expiryStatus = undefined; it.expiryRaw = undefined; }
     const added = existing ? Math.max(0, it.quantity - existing.quantity) : it.quantity;
+    if (it.noExpiry) { it.expiry = undefined; it.expiryMonthOnly = undefined; it.expiryRaw = undefined; it.expiryStatus = undefined; await cancelExpiryJobs(it.id); }
     await saveItem(it);
     if (it.price && added) await recordPurchase(it, added, it.price);
     s.close(); S.tab = 'items';
@@ -630,6 +694,7 @@ function editItem(existing: Item | null, prefill: Partial<Item> = {}, autoCat = 
 }
 
 function expiryNote(it: Item) {
+  if (it.noExpiry) return 'This item does not expire.';
   if (it.expiryStatus === 'reading') return 'Reading the date in the background…';
   if (it.expiryStatus === 'failed') return "Couldn't read a date. Scan again or enter it here.";
   if (it.expiryStatus === 'pending') return 'Suggested date — confirm it from Dates to check, or edit it here.';
@@ -643,13 +708,16 @@ function prettyDate(iso: string, monthOnly?: boolean) {
 const captureExpiryPhoto = () => scanner().then(m => m.capturePhoto('Scan expiry date', 'Fill the box with the date, e.g. “BB 12/03/26”'));
 
 async function startExpiryRead(item: Item, blob: Blob) {
-  item.expiry = undefined; item.expiryMonthOnly = undefined; item.expiryRaw = undefined; item.expiryStatus = 'reading';
+  cancelledExpiryItems.delete(item.id);
+  item.noExpiry = undefined; item.expiry = undefined; item.expiryMonthOnly = undefined; item.expiryRaw = undefined; item.expiryStatus = 'reading';
   await saveItem(item);
   const job: db.ExpiryJob = { id: db.uid(), itemId: item.id, photo: blob, addedAt: Date.now(), attempts: 0 };
   await db.put('expiryJobs', job);
   pumpExpiryJobs();
 }
+const cancelledExpiryItems = new Set<string>();
 async function cancelExpiryJobs(itemId: string) {
+  cancelledExpiryItems.add(itemId);
   for (const j of (await db.getAll<db.ExpiryJob>('expiryJobs')).filter(j => j.itemId === itemId)) await db.del('expiryJobs', j.id);
 }
 
@@ -661,7 +729,7 @@ async function afterNewItem(item: Item, nextAdd: 'barcode' | 'menu' | null, alre
     else if (nextAdd === 'menu') addMenu();
     return;
   }
-  if (item.expiry && !item.expiryStatus) { toast('Added'); return; }
+  if (item.noExpiry || (item.expiry && !item.expiryStatus)) { toast('Added'); return; }
   const choice = await offerScanExpiry(item);
   render();
   if (choice === 'done') { toast('Added'); return; }
@@ -722,7 +790,7 @@ async function pumpExpiryJobs() {
 async function runExpiryJob(job: db.ExpiryJob) {
   const still = () => {
     const it = S.items.find(i => i.id === job.itemId);
-    return it && it.status === 'active' && it.expiryStatus === 'reading' ? it : null;
+    return it && it.status === 'active' && it.expiryStatus === 'reading' && !it.noExpiry && !cancelledExpiryItems.has(job.itemId) ? it : null;
   };
   if (!still()) { await db.del('expiryJobs', job.id); return; }
   job.attempts++;
@@ -826,7 +894,7 @@ function shoppingView() {
   return `<header class="hdr"><h1>Shopping list</h1>${done.length ? '<button class="link" id="clear-done">Clear ticked</button>' : ''}</header>
     <form class="search" id="add-shop"><span>＋</span><input id="shop-in" placeholder="Add to list" autocomplete="off" enterkeyhint="done"></form>
     ${open.length || done.length ? `<ul class="list shop">${[...open, ...done].map(s => `
-      <li class="item ${s.done ? 'done' : ''}" data-sid="${s.id}"><span class="check">${s.done ? '✓' : ''}</span><div class="meta"><div class="name">${esc(s.name)}</div></div><button class="icon-btn" data-rm="${s.id}" aria-label="Remove">✕</button></li>`).join('')}</ul>`
+      <li class="item ${s.done ? 'done' : ''}" data-sid="${s.id}"><span class="check">${s.done ? '✓' : ''}</span><div class="meta"><div class="name">${esc(s.name)}</div>${(() => { const src = s.fromItemId ? S.items.find(x => x.id === s.fromItemId) : undefined; if (!src) return ''; const c = catOf(src.categoryId); return `<div class="sub">${c.icon} ${esc(c.name)}</div>`; })()}</div><button class="icon-btn" data-rm="${s.id}" aria-label="Remove">✕</button></li>`).join('')}</ul>`
       : `<div class="empty"><div class="empty-icon">🛒</div><h3>Nothing to buy</h3><p>Items you finish are added here automatically.</p></div>`}`;
 }
 function bindShopping() {

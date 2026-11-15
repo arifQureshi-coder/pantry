@@ -15,6 +15,7 @@ export interface Item {
   expiryMonthOnly?: boolean;
   expiryStatus?: 'reading' | 'pending' | 'failed'; // undefined = confirmed (or no date)
   expiryRaw?: string;    // text the scanner read, until the date is confirmed
+  noExpiry?: boolean;    // explicitly does not expire (not the same as a missing date)
   opened?: string;       // yyyy-mm-dd
   price?: number;        // unit price in AUD
   addedAt: number;

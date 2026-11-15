@@ -90,6 +90,7 @@ a { color: var(--accent); }
 .pill.reading { display: inline-flex; align-items: center; gap: 6px; background: var(--surface-2); color: var(--muted); }
 .pill.pending { box-shadow: inset 0 0 0 1px color-mix(in srgb, currentColor 35%, transparent); }
 .pill.failed { background: var(--surface-2); color: var(--muted); white-space: normal; text-align: right; line-height: 1.25; max-width: 8.6rem; }
+.pill.noexpiry { background: var(--surface-2); color: var(--muted); }
 .spin-sm { width: 12px; height: 12px; border: 2px solid color-mix(in srgb, currentColor 30%, transparent); border-top-color: currentColor; border-radius: 50%; animation: spin .8s linear infinite; flex: none; }
 
 .dates-list { list-style: none; padding: 0; margin: 0; }
@@ -156,7 +157,9 @@ a { color: var(--accent); }
 .field > span { display: block; font-size: 13px; font-weight: 600; color: var(--muted); margin-bottom: 6px; text-transform: uppercase; letter-spacing: .03em; }
 .field input, .field select, #c-custom { width: 100%; background: var(--surface); border: 1px solid var(--border); border-radius: 12px; padding: 12px; outline: none; min-height: 46px; }
 .field input:focus { border-color: var(--accent); }
-.date-row { display: flex; gap: 8px; } .date-row input { flex: 1; } .date-row .btn { flex: none; }
+.date-row { display: flex; gap: 8px; flex-wrap: wrap; } .date-row input { flex: 1; min-width: 8rem; } .date-row .btn { flex: none; }
+.toggle { display: flex; align-items: center; gap: 8px; margin: 10px 0 0; font-size: 15px; font-weight: 500; color: var(--text); }
+.toggle input { width: 20px; height: 20px; accent-color: var(--accent); -webkit-appearance: auto; appearance: auto; flex: none; }
 .two { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; }
 .cat-pick { display: flex; flex-wrap: wrap; gap: 6px; }
 .stepper { display: flex; align-items: center; background: var(--surface); border: 1px solid var(--border); border-radius: 12px; overflow: hidden; }
