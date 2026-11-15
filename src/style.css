@@ -166,8 +166,8 @@ a { color: var(--accent); }
 .review input[type=checkbox] { -webkit-appearance: auto; appearance: auto; width: 22px; height: 22px; margin-top: 10px; accent-color: var(--accent); flex: none; }
 .rv-main { flex: 1; min-width: 0; }
 .rv-name { width: 100%; border: 0; background: transparent; font-weight: 600; padding: 8px 0; outline: none; }
-.rv-sub { display: flex; gap: 8px; } .rv-sub select { flex: 1; min-width: 0; } .rv-qty { width: 64px; }
-.rv-sub select, .rv-qty { background: var(--surface-2); border: 0; border-radius: 8px; padding: 6px 8px; font-size: 14px; }
+.rv-sub { display: flex; gap: 8px; } .rv-sub select { flex: 1; min-width: 0; } .rv-qty { width: 56px; } .rv-price { width: 76px; }
+.rv-sub select, .rv-qty, .rv-price { background: var(--surface-2); border: 0; border-radius: 8px; padding: 6px 8px; font-size: 14px; }
 
 /* shopping */
 .shop .check { width: 24px; height: 24px; border-radius: 50%; border: 2px solid var(--border); display: grid; place-items: center; color: var(--accent-ink); font-size: 14px; flex: none; }
@@ -176,6 +176,14 @@ a { color: var(--accent); }
 
 /* stats + settings */
 .cards { display: grid; grid-template-columns: repeat(3, 1fr); gap: 10px; margin-bottom: 14px; }
+.cards.two { grid-template-columns: 1fr 1fr; margin: 0 0 12px; }
+.sub-h { margin: 4px 0 8px; font-size: 13px; font-weight: 600; color: var(--muted); text-transform: uppercase; letter-spacing: .03em; }
+.spend-list { list-style: none; padding: 0; margin: 0 0 12px; }
+.spend-list li { display: grid; grid-template-columns: 1fr auto; gap: 4px 10px; padding: 8px 0; align-items: baseline; }
+.spend-list li + li { border-top: 1px solid var(--border); }
+.spend-list .sbar { grid-column: 1 / -1; height: 8px; background: var(--accent); border-radius: 4px; }
+.waste-line { margin: 8px 0 0; font-size: 14px; }
+#e-price-note { display: block; margin-top: 4px; }
 .card { background: var(--surface); border-radius: var(--radius); box-shadow: var(--shadow); padding: 14px; display: flex; flex-direction: column; }
 button.card { width: 100%; text-align: left; }
 button.card:active { background: var(--surface-2); }

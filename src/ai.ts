@@ -74,18 +74,25 @@ export async function askAI(s: Settings, prompt: string, imageDataUrl?: string):
 
 const catList = (cats: Category[]) => cats.map(c => `${c.id} (${c.name})`).join(', ');
 
-export interface ReceiptLine { name: string; quantity: number; categoryId: string; }
+export interface ReceiptLine { name: string; quantity: number; categoryId: string; price?: number; }
 export async function extractReceipt(s: Settings, image: string, cats: Category[]): Promise<ReceiptLine[]> {
   const prompt = `You are reading an Australian supermarket receipt (e.g. Woolworths, Coles, Aldi, IGA).
 Extract only purchased grocery/household products. Ignore totals, subtotals, GST, discounts, savings, loyalty points, payment, change and store info.
 Expand abbreviations into clear readable product names, e.g. "WW FR MLK 2L" -> "Woolworths Full Cream Milk 2L", "CC BTR 250G" -> "Coles Butter 250g", "BNNA CAVNDSH KG" -> "Cavendish Bananas".
 If a line has a quantity multiplier (e.g. "2 @ $3.50" or "QTY 2") use it as quantity, otherwise 1. Merge duplicate lines by adding quantities.
+For each line include "price" as the amount charged for that line in Australian dollars (the line total, not a unit price, unless only a unit price is printed). If no price is visible, use null.
 Pick the best category id for each item from: ${catList(cats)}.
-Return JSON only: {"items":[{"name":string,"quantity":number,"categoryId":string}]}`;
+Return JSON only: {"items":[{"name":string,"quantity":number,"categoryId":string,"price":number|null}]}`;
   const j = await askAI(s, prompt, image);
   const ids = new Set(cats.map(c => c.id));
+  const money = (v: any) => {
+    if (v == null || v === '') return undefined;
+    const n = typeof v === 'number' ? v : parseFloat(String(v).replace(/[^0-9.]/g, ''));
+    return Number.isFinite(n) && n >= 0 ? Math.round(n * 100) / 100 : undefined;
+  };
   return (j.items ?? j ?? []).filter((x: any) => x?.name).map((x: any) => ({
     name: String(x.name).trim(), quantity: Math.max(1, Math.round(+x.quantity || 1)), categoryId: ids.has(x.categoryId) ? x.categoryId : 'other',
+    price: money(x.price),
   }));
 }
 

@@ -1,5 +1,5 @@
 import './style.css';
-import type { Item, Category, ShopItem, Settings, Location, WasteEvent } from './types';
+import type { Item, Category, ShopItem, Settings, Location, WasteEvent, Purchase } from './types';
 import * as db from './db';
 import { guessCategory, defaultLocation, ICON_CHOICES } from './categories';
 import { daysUntil, formatDate, parseExpiry } from './dates';
@@ -13,7 +13,7 @@ type Tab = 'items' | 'shopping' | 'stats' | 'settings';
 type StatusFilter = 'all' | 'soon' | 'expired' | 'fresh' | 'none' | 'attention';
 const S = {
   tab: 'items' as Tab,
-  items: [] as Item[], cats: [] as Category[], shop: [] as ShopItem[], events: [] as WasteEvent[],
+  items: [] as Item[], cats: [] as Category[], shop: [] as ShopItem[], events: [] as WasteEvent[], purchases: [] as Purchase[],
   settings: db.DEFAULT_SETTINGS as Settings,
   q: '', cat: 'all', loc: 'all' as 'all' | Location, sort: 'expiry' as 'expiry' | 'name' | 'added', view: 'list' as 'list' | 'grid',
   status: 'all' as StatusFilter,
@@ -24,10 +24,29 @@ const todayISO = () => { const d = new Date(); return `${d.getFullYear()}-${Stri
 const localDate = (iso: string) => { const [y, m, d] = iso.split('-').map(Number); return new Date(y, m - 1, d); };
 const catOf = (id: string) => S.cats.find(c => c.id === id) ?? { id: 'other', name: 'Other', icon: '📦' };
 const active = () => S.items.filter(i => i.status === 'active');
+const money = (n: number) => new Intl.NumberFormat('en-AU', { style: 'currency', currency: 'AUD' }).format(n);
+const parseMoney = (v: string) => {
+  const n = parseFloat(v.replace(/[^0-9.]/g, ''));
+  return Number.isFinite(n) && n >= 0 ? Math.round(n * 100) / 100 : undefined;
+};
+function lastPaid(opts: { barcode?: string; name?: string }): number | undefined {
+  const code = opts.barcode, name = opts.name?.trim().toLowerCase();
+  const buys = S.purchases.filter(p => p.unitPrice > 0).sort((a, b) => b.at - a.at);
+  if (code) { const hit = buys.find(p => p.barcode === code); if (hit) return hit.unitPrice; }
+  if (name) { const hit = buys.find(p => p.name.toLowerCase() === name); if (hit) return hit.unitPrice; }
+  const items = [...S.items].filter(i => i.price && i.price > 0).sort((a, b) => b.addedAt - a.addedAt);
+  if (code) { const hit = items.find(i => i.barcode === code); if (hit) return hit.price; }
+  if (name) { const hit = items.find(i => i.name.toLowerCase() === name); if (hit) return hit.price; }
+}
+async function recordPurchase(i: Item, quantity: number, unitPrice: number, at = Date.now()) {
+  if (!(unitPrice > 0) || quantity <= 0) return;
+  const p: Purchase = { id: db.uid(), itemId: i.id, name: i.name, barcode: i.barcode, categoryId: i.categoryId, unitPrice, quantity, total: Math.round(unitPrice * quantity * 100) / 100, at };
+  await db.put('purchases', p); S.purchases.push(p);
+}
 
 async function load() {
   S.cats = await db.ensureCategories();
-  [S.items, S.shop, S.events, S.settings] = await Promise.all([db.getAll<Item>('items'), db.getAll<ShopItem>('shopping'), db.getAll<WasteEvent>('events'), db.getSettings()]);
+  [S.items, S.shop, S.events, S.settings, S.purchases] = await Promise.all([db.getAll<Item>('items'), db.getAll<ShopItem>('shopping'), db.getAll<WasteEvent>('events'), db.getSettings(), db.getAll<Purchase>('purchases')]);
 }
 
 // ---------- expiry helpers ----------
@@ -303,12 +322,16 @@ async function barcodeFlow() {
   // Same barcode already in stock? Offer a quick +1 instead of a duplicate.
   const existing = active().find(i => i.barcode === code);
   if (existing && confirm(`You already have ${existing.name} (×${existing.quantity}). Add 1 to its quantity?\n\nCancel adds it as a separate item (e.g. a different expiry).`)) {
-    await saveItem({ ...existing, quantity: existing.quantity + 1 }); render(); return toast(`${existing.name}: ×${existing.quantity + 1}`);
+    const nxt = { ...existing, quantity: existing.quantity + 1 };
+    await saveItem(nxt);
+    if (nxt.price) await recordPurchase(nxt, 1, nxt.price);
+    render(); return toast(`${existing.name}: ×${nxt.quantity}`);
   }
   if (!p) toast('Product not found. Enter the details.');
   const name = p ? [p.name, p.quantity].filter(Boolean).join(' ') : '';
   const catId = name ? guessCategory(`${name} ${p?.categoriesText ?? ''}`) : 'other';
-  editItem(null, { name, brand: p?.brand, image: p?.image, barcode: code, categoryId: catId, location: defaultLocation(catId) }, !!name, 'barcode');
+  const paid = lastPaid({ barcode: code, name });
+  editItem(null, { name, brand: p?.brand, image: p?.image, barcode: code, categoryId: catId, location: defaultLocation(catId), price: paid }, !!name, 'barcode');
 }
 
 async function receiptFlow() {
@@ -327,7 +350,8 @@ async function receiptFlow() {
       <input type="checkbox" checked aria-label="Include">
       <div class="rv-main"><input class="rv-name" value="${esc(l.name)}"><div class="rv-sub">
         <select class="rv-cat">${catOpts(l.categoryId)}</select>
-        <input class="rv-qty" type="number" min="1" inputmode="numeric" value="${l.quantity}" aria-label="Quantity"></div></div></li>`).join('')}</ul>
+        <input class="rv-qty" type="number" min="1" inputmode="numeric" value="${l.quantity}" aria-label="Quantity">
+        <input class="rv-price" type="number" min="0" step="0.01" inputmode="decimal" value="${l.price ?? ''}" placeholder="$" aria-label="Line price"></div></div></li>`).join('')}</ul>
     <div class="sheet-foot"><button class="btn ghost" data-close>Cancel</button><button class="btn primary" id="rv-add">Add items</button></div>`, { full: true });
   $('#rv-add', s.el).onclick = async () => {
     let n = 0;
@@ -335,7 +359,12 @@ async function receiptFlow() {
       if (!$<HTMLInputElement>('input[type=checkbox]', li).checked) continue;
       const name = $<HTMLInputElement>('.rv-name', li).value.trim(); if (!name) continue;
       const categoryId = $<HTMLSelectElement>('.rv-cat', li).value;
-      await saveItem({ ...blank(), name, categoryId, location: defaultLocation(categoryId), quantity: Math.max(1, +$<HTMLInputElement>('.rv-qty', li).value || 1) });
+      const quantity = Math.max(1, +$<HTMLInputElement>('.rv-qty', li).value || 1);
+      const linePrice = parseMoney($<HTMLInputElement>('.rv-price', li).value);
+      const price = linePrice != null ? Math.round(linePrice / quantity * 100) / 100 : undefined;
+      const it = { ...blank(), name, categoryId, location: defaultLocation(categoryId), quantity, price };
+      await saveItem(it);
+      if (price) await recordPurchase(it, quantity, price);
       n++;
     }
     s.close(); S.tab = 'items'; render(); toast(`Added ${n} item${n === 1 ? '' : 's'}. Tap one to add its expiry.`);
@@ -367,11 +396,19 @@ function editItem(existing: Item | null, prefill: Partial<Item> = {}, autoCat = 
     <div class="field"><span>Stored in</span><div class="seg" id="e-loc">${(['Fridge', 'Freezer', 'Pantry'] as Location[]).map(l => `<button data-l="${l}" class="${it.location === l ? 'on' : ''}">${{ Fridge: '❄️', Freezer: '🧊', Pantry: '🗄️' }[l]} ${l}</button>`).join('')}</div></div>
     <div class="two">
       <div class="field"><span>Quantity</span><div class="stepper"><button data-q="-1">−</button><input id="e-qty" type="number" min="1" inputmode="numeric" value="${it.quantity}"><button data-q="1">＋</button></div></div>
-      <label class="field"><span>Opened on</span><input id="e-open" type="date" value="${it.opened ?? ''}"></label>
+      <label class="field"><span>Price (AUD)</span><input id="e-price" type="number" min="0" step="0.01" inputmode="decimal" value="${it.price ?? ''}" placeholder="Optional"><small class="muted" id="e-price-note"></small></label>
     </div>
-    <details class="more"><summary>More</summary><label class="field"><span>Brand</span><input id="e-brand" value="${esc(it.brand ?? '')}"></label>${it.barcode ? `<p class="muted">Barcode ${esc(it.barcode)}</p>` : ''}</details>
+    <details class="more"><summary>More</summary>
+      <label class="field"><span>Opened on</span><input id="e-open" type="date" value="${it.opened ?? ''}"></label>
+      <label class="field"><span>Brand</span><input id="e-brand" value="${esc(it.brand ?? '')}"></label>${it.barcode ? `<p class="muted">Barcode ${esc(it.barcode)}</p>` : ''}
+    </details>
     <div class="sheet-foot">${existing ? '<button class="btn ghost danger" id="e-del">Delete</button>' : '<button class="btn ghost" data-close>Cancel</button>'}<button class="btn primary" id="e-save">Save</button></div>`, { full: true });
   const el = s.el;
+  if (!existing) {
+    const paid = it.price ?? lastPaid({ barcode: it.barcode, name: it.name });
+    if (it.price == null && paid != null) { it.price = paid; $<HTMLInputElement>('#e-price', el).value = String(paid); }
+    if (paid != null && it.price === paid) $('#e-price-note', el).textContent = `Last paid ${money(paid)}`;
+  }
   const setCat = (id: string) => { it.categoryId = id; el.querySelectorAll<HTMLElement>('[data-c]').forEach(b => b.classList.toggle('on', b.dataset.c === id)); };
   el.querySelectorAll<HTMLElement>('[data-c]').forEach(b => b.onclick = () => { catTouched = true; setCat(b.dataset.c!); $('#e-cat-ai', el).textContent = ''; });
   el.querySelectorAll<HTMLElement>('[data-l]').forEach(b => b.onclick = () => { it.location = b.dataset.l as Location; el.querySelectorAll<HTMLElement>('[data-l]').forEach(x => x.classList.toggle('on', x === b)); });
@@ -402,6 +439,7 @@ function editItem(existing: Item | null, prefill: Partial<Item> = {}, autoCat = 
     else if (it.expiryStatus !== 'reading' && it.expiryStatus !== 'pending') { it.expiry = undefined; }
     it.opened = $<HTMLInputElement>('#e-open', el).value || undefined;
     it.quantity = Math.max(1, +qty.value || 1);
+    it.price = parseMoney($<HTMLInputElement>('#e-price', el).value);
     it.brand = $<HTMLInputElement>('#e-brand', el).value.trim() || undefined;
   };
   $('#e-scan', el).onclick = async () => {
@@ -417,7 +455,10 @@ function editItem(existing: Item | null, prefill: Partial<Item> = {}, autoCat = 
     readForm();
     if (!it.name) { $<HTMLInputElement>('#e-name', el).focus(); return toast('Give it a name'); }
     if (it.expiry && it.expiryStatus !== 'pending') { it.expiryStatus = undefined; it.expiryRaw = undefined; }
-    await saveItem(it); s.close(); S.tab = 'items';
+    const added = existing ? Math.max(0, it.quantity - existing.quantity) : it.quantity;
+    await saveItem(it);
+    if (it.price && added) await recordPurchase(it, added, it.price);
+    s.close(); S.tab = 'items';
     if (!existing) await afterNewItem(it, nextAdd ?? 'menu', it.expiryStatus === 'reading');
     else { render(); toast('Saved'); }
   };
@@ -427,7 +468,7 @@ function editItem(existing: Item | null, prefill: Partial<Item> = {}, autoCat = 
     await db.del('items', it.id); S.items = S.items.filter(x => x.id !== it.id); s.close(); render();
   });
   const finish = async (type: 'used' | 'binned') => {
-    const ev: WasteEvent = { id: db.uid(), name: existing!.name, categoryId: existing!.categoryId, type, at: Date.now() };
+    const ev: WasteEvent = { id: db.uid(), name: existing!.name, categoryId: existing!.categoryId, type, at: Date.now(), unitPrice: existing!.price, quantity: 1 };
     await db.put('events', ev); S.events.push(ev);
     const cur = { ...existing! };
     if (cur.quantity > 1) { cur.quantity--; await saveItem(cur); toast(`${type === 'used' ? 'Used' : 'Binned'} one. ${cur.quantity} left.`); }
@@ -659,6 +700,15 @@ function bindShopping() {
 }
 
 // ---------- stats ----------
+function startOfWeek(d = new Date()) {
+  const x = new Date(d.getFullYear(), d.getMonth(), d.getDate());
+  const day = x.getDay();
+  x.setDate(x.getDate() - (day === 0 ? 6 : day - 1));
+  return x.getTime();
+}
+function startOfMonth(d = new Date()) { return new Date(d.getFullYear(), d.getMonth(), 1).getTime(); }
+const spendSince = (from: number) => S.purchases.filter(p => p.at >= from).reduce((s, p) => s + p.total, 0);
+
 function statsView() {
   const since = Date.now() - 30 * 864e5;
   const recent = S.events.filter(e => e.at >= since);
@@ -666,12 +716,25 @@ function statsView() {
   const pct = used + binned ? Math.round((binned / (used + binned)) * 100) : 0;
   const top = Object.entries(S.events.filter(e => e.type === 'binned').reduce<Record<string, number>>((m, e) => (m[e.name] = (m[e.name] ?? 0) + 1, m), {})).sort((a, b) => b[1] - a[1]).slice(0, 5);
   const a = active();
+  const week = spendSince(startOfWeek()), month = spendSince(startOfMonth());
+  const byCat = Object.entries(S.purchases.filter(p => p.at >= startOfMonth()).reduce<Record<string, number>>((m, p) => (m[p.categoryId] = (m[p.categoryId] ?? 0) + p.total, m), {})).sort((x, y) => y[1] - x[1]);
+  const catMax = byCat[0]?.[1] ?? 0;
+  const wasted = S.events.filter(e => e.type === 'binned' && e.at >= startOfMonth()).reduce((s, e) => s + (e.unitPrice ?? 0) * (e.quantity ?? 1), 0);
   return `<header class="hdr"><h1>Stats</h1></header>
     <div class="cards">
       <div class="card"><b>${a.length}</b><span>In stock</span></div>
       <button class="card amber" data-jump="soon" aria-label="Show items expiring soon"><b>${a.filter(i => freshness(i) === 'soon').length}</b><span>Expiring soon</span></button>
       <button class="card red" data-jump="expired" aria-label="Show expired items"><b>${a.filter(i => freshness(i) === 'expired').length}</b><span>Expired</span></button>
     </div>
+    <section class="panel"><h3>Spending</h3>
+      <div class="cards two">
+        <div class="card"><b>${money(week)}</b><span>This week</span></div>
+        <div class="card"><b>${money(month)}</b><span>This month</span></div>
+      </div>
+      ${byCat.length ? `<h4 class="sub-h">This month by category</h4>
+        <ul class="spend-list">${byCat.map(([id, n]) => { const c = catOf(id); return `<li><span>${c.icon} ${esc(c.name)}</span><b>${money(n)}</b><i class="sbar" style="width:${catMax ? Math.max(4, (n / catMax) * 100) : 0}%"></i></li>`; }).join('')}</ul>` : '<p class="muted">Add a price when you save an item, or scan a receipt, to start tracking spend.</p>'}
+      <p class="waste-line">🗑️ <b>${money(wasted)}</b> wasted on binned items this month</p>
+    </section>
     <section class="panel"><h3>Last 30 days</h3>
       <div class="bar"><i style="width:${100 - pct}%"></i></div>
       <div class="row-between"><span>✅ Used <b>${used}</b></span><span>🗑️ Binned <b>${binned}</b></span></div>
@@ -795,12 +858,28 @@ async function checkReminders(force = false) {
 /** ?demo in the URL fills an empty app with sample items (used for screenshots). */
 async function seedDemo() {
   const d = (n: number) => { const x = new Date(); x.setDate(x.getDate() + n); return `${x.getFullYear()}-${String(x.getMonth() + 1).padStart(2, '0')}-${String(x.getDate()).padStart(2, '0')}`; };
-  const rows: [string, string, Location, number, number | null][] = [
-    ['Full Cream Milk 2L', 'dairy', 'Fridge', 1, 2], ['Greek Yoghurt', 'dairy', 'Fridge', 1, -1], ['Baby Spinach', 'produce', 'Fridge', 1, 1],
-    ['Chicken Thighs 500g', 'meat', 'Fridge', 1, 4], ['Sourdough Loaf', 'bakery', 'Pantry', 1, 6], ['Frozen Peas 1kg', 'frozen', 'Freezer', 1, 120],
-    ['Spaghetti 500g', 'pantry', 'Pantry', 2, 300], ['Diced Tomatoes 400g', 'canned', 'Pantry', 3, 420], ['Tim Tams', 'snacks', 'Pantry', 1, 45],
+  const rows: [string, string, Location, number, number | null, number, number][] = [
+    ['Full Cream Milk 2L', 'dairy', 'Fridge', 1, 2, 3.2, 2],
+    ['Greek Yoghurt', 'dairy', 'Fridge', 1, -1, 5.5, 1],
+    ['Baby Spinach', 'produce', 'Fridge', 1, 1, 3, 1],
+    ['Chicken Thighs 500g', 'meat', 'Fridge', 1, 4, 8.5, 3],
+    ['Sourdough Loaf', 'bakery', 'Pantry', 1, 6, 6, 4],
+    ['Frozen Peas 1kg', 'frozen', 'Freezer', 1, 120, 3.8, 2],
+    ['Spaghetti 500g', 'pantry', 'Pantry', 2, 300, 1.8, 10],
+    ['Diced Tomatoes 400g', 'canned', 'Pantry', 3, 420, 1.2, 12],
+    ['Tim Tams', 'snacks', 'Pantry', 1, 45, 4.5, 0],
   ];
-  for (const [name, categoryId, location, quantity, days] of rows) await saveItem({ ...blank(), name, categoryId, location, quantity, expiry: days === null ? undefined : d(days) });
+  for (const [name, categoryId, location, quantity, days, price, boughtAgo] of rows) {
+    const it = { ...blank(), name, categoryId, location, quantity, price, expiry: days === null ? undefined : d(days) };
+    await saveItem(it);
+    await recordPurchase(it, quantity, price, Date.now() - boughtAgo * 864e5);
+  }
+  const salad: Purchase = { id: db.uid(), name: 'Bagged Salad', categoryId: 'produce', unitPrice: 3.5, quantity: 1, total: 3.5, at: Date.now() - 3 * 864e5 };
+  await db.put('purchases', salad); S.purchases.push(salad);
+  const ev: WasteEvent = { id: db.uid(), name: 'Bagged Salad', categoryId: 'produce', type: 'binned', at: Date.now() - 3 * 864e5, unitPrice: 3.5, quantity: 1 };
+  await db.put('events', ev); S.events.push(ev);
+  const used: WasteEvent = { id: db.uid(), name: 'Full Cream Milk 2L', categoryId: 'dairy', type: 'used', at: Date.now() - 5 * 864e5, unitPrice: 3.2, quantity: 1 };
+  await db.put('events', used); S.events.push(used);
   const si: ShopItem = { id: db.uid(), name: 'Eggs', done: false, addedAt: Date.now() }; await db.put('shopping', si); S.shop.push(si);
 }
 

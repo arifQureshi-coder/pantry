@@ -16,6 +16,7 @@ export interface Item {
   expiryStatus?: 'reading' | 'pending' | 'failed'; // undefined = confirmed (or no date)
   expiryRaw?: string;    // text the scanner read, until the date is confirmed
   opened?: string;       // yyyy-mm-dd
+  price?: number;        // unit price in AUD
   addedAt: number;
   status: Status;
   finishedAt?: number;
@@ -35,4 +36,17 @@ export interface Settings {
   lastNotified?: string;   // yyyy-mm-dd, avoid repeat notifications on the same day
 }
 
-export interface WasteEvent { id: string; name: string; categoryId: string; type: 'used' | 'binned'; at: number; }
+export interface WasteEvent { id: string; name: string; categoryId: string; type: 'used' | 'binned'; at: number; unitPrice?: number; quantity?: number; }
+
+/** A recorded spend, kept even if the item is later used up or deleted. */
+export interface Purchase {
+  id: string;
+  itemId?: string;
+  name: string;
+  barcode?: string;
+  categoryId: string;
+  unitPrice: number;
+  quantity: number;
+  total: number;
+  at: number;
+}

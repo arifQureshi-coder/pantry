@@ -1,16 +1,16 @@
-import type { Item, Category, ShopItem, Settings, WasteEvent } from './types';
+import type { Item, Category, ShopItem, Settings, WasteEvent, Purchase } from './types';
 import { PRESET_CATEGORIES } from './categories';
 
 /** Tiny promise wrapper around IndexedDB. Everything lives on this device only. */
 const DB_NAME = 'pantry';
-const STORES = ['items', 'categories', 'shopping', 'events', 'kv', 'expiryJobs'] as const;
+const STORES = ['items', 'categories', 'shopping', 'events', 'kv', 'expiryJobs', 'purchases'] as const;
 type StoreName = typeof STORES[number];
 let dbp: Promise<IDBDatabase> | null = null;
 
 function open(): Promise<IDBDatabase> {
   if (dbp) return dbp;
   dbp = new Promise((res, rej) => {
-    const r = indexedDB.open(DB_NAME, 2);
+    const r = indexedDB.open(DB_NAME, 3);
     r.onupgradeneeded = () => {
       const db = r.result;
       for (const s of STORES) if (!db.objectStoreNames.contains(s)) db.createObjectStore(s, { keyPath: s === 'kv' ? 'key' : 'id' });
@@ -51,15 +51,15 @@ export async function ensureCategories(): Promise<Category[]> {
 
 export const uid = () => (crypto.randomUUID ? crypto.randomUUID() : Math.random().toString(36).slice(2) + Date.now().toString(36));
 
-export interface Backup { app: 'pantry'; version: 1; exportedAt: string; items: Item[]; categories: Category[]; shopping: ShopItem[]; events: WasteEvent[]; settings: Omit<Settings, 'geminiKey' | 'openaiKey'>; }
+export interface Backup { app: 'pantry'; version: 1 | 2; exportedAt: string; items: Item[]; categories: Category[]; shopping: ShopItem[]; events: WasteEvent[]; purchases?: Purchase[]; settings: Omit<Settings, 'geminiKey' | 'openaiKey'>; }
 export async function exportData(): Promise<Backup> {
   const { geminiKey, openaiKey, ...settings } = await getSettings();
   void geminiKey; void openaiKey;
-  return { app: 'pantry', version: 1, exportedAt: new Date().toISOString(), items: await getAll('items'), categories: await getAll('categories'), shopping: await getAll('shopping'), events: await getAll('events'), settings };
+  return { app: 'pantry', version: 2, exportedAt: new Date().toISOString(), items: await getAll('items'), categories: await getAll('categories'), shopping: await getAll('shopping'), events: await getAll('events'), purchases: await getAll('purchases'), settings };
 }
 export async function importData(b: Backup) {
   if (b?.app !== 'pantry' || !Array.isArray(b.items)) throw new Error('Not a Pantry backup file');
-  for (const s of ['items', 'categories', 'shopping', 'events'] as const) {
+  for (const s of ['items', 'categories', 'shopping', 'events', 'purchases'] as const) {
     await clear(s);
     for (const row of (b as any)[s] ?? []) await put(s, row);
   }
