@@ -1,0 +1,12 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512" width="512" height="512">
+  <defs><linearGradient id="g" x1="0" y1="0" x2="0" y2="1"><stop offset="0" stop-color="#22c55e"/><stop offset="1" stop-color="#15803d"/></linearGradient></defs>
+  <rect width="512" height="512" fill="url(#g)"/>
+  <!-- jar -->
+  <rect x="176" y="118" width="160" height="40" rx="12" fill="#ffffff" opacity=".95"/>
+  <path d="M168 170 h176 a28 28 0 0 1 28 28 v170 a44 44 0 0 1 -44 44 h-144 a44 44 0 0 1 -44 -44 v-170 a28 28 0 0 1 28 -28z" fill="#ffffff"/>
+  <!-- label -->
+  <rect x="180" y="250" width="152" height="84" rx="14" fill="#dcfce7"/>
+  <!-- leaf -->
+  <path d="M256 318 c-34 -8 -42 -42 -24 -62 c18 -20 52 -16 60 -36 c10 30 4 88 -36 98z" fill="#16a34a"/>
+  <path d="M232 322 c10 -18 24 -34 46 -50" stroke="#15803d" stroke-width="6" fill="none" stroke-linecap="round"/>
+</svg>
