@@ -26,101 +26,192 @@ page.on('pageerror', e => errors.push(e.message));
 page.on('dialog', d => d.accept());
 const closed = () => page.waitForSelector('.sheet-wrap.open', { state: 'detached' });
 
-// ---------- 1. Migration: an old (v3) database keeps every item and joins Regular ----------
-await page.goto(BASE + '?nosw', { waitUntil: 'domcontentloaded' });
-await page.evaluate(() => new Promise(res => { const r = indexedDB.deleteDatabase('pantry'); r.onsuccess = r.onerror = r.onblocked = () => res(); }));
-await page.goto('about:blank');
-await page.goto(BASE + 'manifest.webmanifest');
-await page.evaluate(() => new Promise((res, rej) => {
-  const r = indexedDB.open('pantry', 3);
-  r.onupgradeneeded = () => {
-    const db = r.result;
-    for (const s of ['items', 'categories', 'shopping', 'events', 'kv', 'expiryJobs', 'purchases']) db.createObjectStore(s, { keyPath: s === 'kv' ? 'key' : 'id' });
-    const tx = r.transaction;
-    tx.objectStore('categories').put({ id: 'dairy', name: 'Dairy', icon: '🥛', preset: true });
-    tx.objectStore('categories').put({ id: 'other', name: 'Other', icon: '📦', preset: true });
-    tx.objectStore('items').put({ id: 'old1', name: 'Old Cheese', categoryId: 'dairy', location: 'Fridge', quantity: 2, price: 5, addedAt: 1, status: 'active' });
-    tx.objectStore('items').put({ id: 'old2', name: 'Old Butter', categoryId: 'dairy', location: 'Fridge', quantity: 1, addedAt: 2, status: 'used', finishedAt: 3 });
-    tx.objectStore('purchases').put({ id: 'p1', itemId: 'old1', name: 'Old Cheese', categoryId: 'dairy', unitPrice: 5, quantity: 2, total: 10, at: Date.now() });
-    tx.objectStore('events').put({ id: 'e1', name: 'Old Butter', categoryId: 'dairy', type: 'binned', at: Date.now(), unitPrice: 4, quantity: 1 });
-  };
-  r.onsuccess = () => { r.result.close(); res(); };
-  r.onerror = () => rej(r.error);
-}));
-await page.goto(BASE, { waitUntil: 'networkidle' });
-await page.waitForSelector('.item');
-const migrated = await page.evaluate(() => new Promise(res => {
+// Leave the app first so it isn't holding the database open while we delete it.
+const wipe = async () => { await page.goto(BASE + 'manifest.webmanifest'); await wipeHere(); };
+const wipeHere = () => page.evaluate(() => new Promise(res => { const r = indexedDB.deleteDatabase('pantry'); r.onsuccess = r.onerror = r.onblocked = () => res(); }));
+const readDb = () => page.evaluate(() => new Promise(res => {
   const r = indexedDB.open('pantry');
   r.onsuccess = () => {
     const db = r.result; const out = { version: db.version };
-    const tx = db.transaction(['items', 'purchases', 'events', 'collections', 'categories']);
-    const all = n => new Promise(ok => { const q = tx.objectStore(n).getAll(); q.onsuccess = () => ok(q.result); });
-    Promise.all(['items', 'purchases', 'events', 'collections', 'categories'].map(all)).then(([items, purchases, events, collections, categories]) => {
-      Object.assign(out, { items, purchases, events, collections, categories }); db.close(); res(out);
+    const names = ['items', 'purchases', 'events', 'collections', 'categories'];
+    const tx = db.transaction(names);
+    Promise.all(names.map(n => new Promise(ok => { const q = tx.objectStore(n).getAll(); q.onsuccess = () => ok(q.result); }))).then(rows => {
+      names.forEach((n, k) => out[n] = rows[k]); db.close(); res(out);
     });
   };
 }));
-check(migrated.version === 4, 'database upgraded to v4', `got ${migrated.version}`);
-check(migrated.items.length === 2 && migrated.items.every(i => i.collectionId === 'regular' && !i.boughtOn), 'old items kept, moved to Regular, no bought-on date', JSON.stringify(migrated.items));
-check(migrated.purchases.every(p => p.collectionId === 'regular') && migrated.events.every(e => e.collectionId === 'regular'), 'old spend and waste history moved to Regular');
-check(migrated.collections.some(c => c.id === 'regular' && c.name === 'Regular'), 'Regular collection exists');
-check(migrated.categories.length === 2, 'existing categories untouched (no presets re-added)', `got ${migrated.categories.length}`);
+/** Build an old-version database the way an older app release left it. */
+const makeOldDb = (version, rows) => page.evaluate(({ version, rows }) => new Promise((res, rej) => {
+  const r = indexedDB.open('pantry', version);
+  r.onupgradeneeded = () => {
+    const stores = ['items', 'categories', 'shopping', 'events', 'kv', 'expiryJobs', 'purchases', ...(version >= 4 ? ['collections'] : [])];
+    for (const s of stores) r.result.createObjectStore(s, { keyPath: s === 'kv' ? 'key' : 'id' });
+    for (const [s, list] of Object.entries(rows)) for (const row of list) r.transaction.objectStore(s).put(row);
+  };
+  r.onsuccess = () => { r.result.close(); res(); };
+  r.onerror = () => rej(r.error);
+}), { version, rows });
+const expandAll = async () => { while (await page.locator('.cat-group.closed .cat-h').count()) await page.locator('.cat-group.closed .cat-h').first().click(); };
+const now = new Date();
+const prev = new Date(now.getFullYear(), now.getMonth() - 1, 10);
+const prevISO = `${prev.getFullYear()}-${String(prev.getMonth() + 1).padStart(2, '0')}-10`;
+const prevKey = prevISO.slice(0, 7);
+const prevLabel = prev.toLocaleDateString('en-AU', { month: 'short', year: 'numeric' });
+const midday = iso => { const [y, m, d] = iso.split('-').map(Number); return new Date(y, m - 1, d, 12).getTime(); };
 
-// ---------- 2. Demo data: collection filter + grouped view ----------
-await page.evaluate(() => new Promise(res => { const r = indexedDB.deleteDatabase('pantry'); r.onsuccess = r.onerror = r.onblocked = () => res(); }));
+// ---------- 1a. Migration from v3 (before collections) ----------
+await page.goto(BASE + 'manifest.webmanifest');
+await wipe();
+await makeOldDb(3, {
+  categories: [{ id: 'dairy', name: 'Dairy', icon: '🥛', preset: true }, { id: 'other', name: 'Other', icon: '📦', preset: true }],
+  items: [
+    { id: 'old1', name: 'Old Cheese', categoryId: 'dairy', location: 'Fridge', quantity: 2, price: 5, addedAt: 1000, status: 'active' },
+    { id: 'old2', name: 'Old Butter', categoryId: 'dairy', location: 'Fridge', quantity: 1, addedAt: 2000, status: 'used', finishedAt: 3000 },
+  ],
+  purchases: [{ id: 'p1', itemId: 'old1', name: 'Old Cheese', categoryId: 'dairy', unitPrice: 5, quantity: 2, total: 10, at: Date.now() }],
+  events: [
+    { id: 'e1', name: 'Old Butter', categoryId: 'dairy', type: 'binned', at: 5000, unitPrice: 4, quantity: 1 },
+    { id: 'e2', name: 'Long Gone Bread', categoryId: 'other', type: 'used', at: 6000, quantity: 1 },
+  ],
+});
+await page.goto(BASE, { waitUntil: 'networkidle' });
+await page.waitForSelector('.tile');
+let m = await readDb();
+check(m.version === 5, 'v3 database upgraded to v5', `got ${m.version}`);
+check(m.items.length === 2 && m.items.every(i => i.collectionId === 'regular' && !i.boughtOn), 'old items kept, moved to Regular, no bought-on date');
+check(m.purchases.every(p => p.collectionId === 'regular') && m.events.every(e => e.collectionId === 'regular'), 'old spend and waste history moved to Regular');
+check(m.collections.some(c => c.id === 'regular' && c.name === 'Regular'), 'Regular collection exists');
+check(m.categories.length === 2, 'existing categories untouched (no presets re-added)', `got ${m.categories.length}`);
+check(m.purchases[0].boughtAt === 1000, 'old purchase gets its item\'s added date as bought date', m.purchases[0].boughtAt);
+const e1 = m.events.find(e => e.id === 'e1'), e2 = m.events.find(e => e.id === 'e2');
+check(e1.itemId === 'old2' && e1.boughtAt === 2000, 'old binned record linked to its item by name and dated by it', JSON.stringify(e1));
+check(!e2.itemId && e2.boughtAt === 6000, 'unlinked old record falls back to its own date', JSON.stringify(e2));
+
+// ---------- 1b. Migration from v4 (the live version on the phone) ----------
+await wipe();
+await makeOldDb(4, {
+  categories: [{ id: 'dairy', name: 'Dairy', icon: '🥛', preset: true }],
+  collections: [{ id: 'regular', name: 'Regular', builtin: true, createdAt: 0 }, { id: 'col-x', name: 'Guests', createdAt: 1 }],
+  kv: [{ key: 'catsSeeded', value: true }, { key: 'settings', value: { provider: 'gemini', geminiKey: '', geminiModel: 'gemini-3.6-flash', openaiKey: '', openaiModel: 'gpt-4o-mini', leadDays: 3, view: 'grouped' } }],
+  items: [{ id: 'i4', name: 'Brie', categoryId: 'dairy', collectionId: 'col-x', location: 'Fridge', quantity: 1, price: 8, boughtOn: prevISO, addedAt: Date.now(), status: 'active' }],
+  purchases: [{ id: 'p4', itemId: 'i4', name: 'Brie', categoryId: 'dairy', collectionId: 'col-x', unitPrice: 8, quantity: 1, total: 8, at: Date.now() }],
+  events: [{ id: 'e4', itemId: 'i4', name: 'Brie', categoryId: 'dairy', collectionId: 'col-x', type: 'used', at: Date.now(), unitPrice: 8, quantity: 1 }],
+});
+await page.goto(BASE, { waitUntil: 'networkidle' });
+await page.waitForSelector('.tile');
+m = await readDb();
+check(m.version === 5 && m.items.length === 1 && m.collections.length === 2, 'v4 database upgraded to v5 with items and collections kept');
+check(m.purchases[0].boughtAt === midday(prevISO) && m.events[0].boughtAt === midday(prevISO), 'v4 records dated by the item\'s bought-on date');
+check(await page.locator('[data-view=grid].on').count() === 1, 'old saved "grouped" view setting now opens on Grid');
+
+// ---------- 2. Demo data: views, collection dropdown ----------
+await wipe();
 await page.goto(BASE + '?demo', { waitUntil: 'networkidle' });
-await page.waitForSelector('.item');
-const chips = await page.locator('.col-chips .chip').allInnerTexts();
-check(chips.length === 3 && /All/.test(chips[0]) && /Regular/.test(chips[1]) && /Guests/.test(chips[2]), 'collection filter shows All, Regular, Guests', chips.join(' | '));
-await page.locator('[data-col="col-guests"]').click();
+await page.waitForSelector('.tile');
+check(await page.locator('#col-filter').inputValue() === 'all', 'collection dropdown defaults to All collections');
+const colOpts = await page.locator('#col-filter option').allInnerTexts();
+check(colOpts.join('|') === 'All collections|Regular|Guests – Dec', 'dropdown lists All collections plus every collection', colOpts.join('|'));
+check(await page.locator('.col-chips').count() === 0, 'old collection button row is gone');
+await page.locator('#col-filter').selectOption('col-guests');
+const tiles = await page.locator('.tile .tile-name').allInnerTexts();
+check(tiles.length === 2 && tiles.includes('Drinks') && tiles.includes('Frozen'), 'grid follows the collection dropdown', tiles.join(', '));
+await page.locator('[data-view=list]').click();
+await page.waitForSelector('.cat-group');
+check(await page.locator('.cat-group').count() === 2 && await page.locator('.cat-group.closed').count() === 2, 'List groups guest items with headers folded');
+await expandAll();
 let names = await page.locator('.item .name').allInnerTexts();
-check(names.length === 2 && names.includes('Frozen Prawns 1kg') && names.includes('Sparkling Water 10pk'), 'Guests filter shows only guest items', names.join(', '));
-check(await page.locator('.cat-group').count() === 2, 'Guests filter still grouped by category');
-await page.locator('[data-col="regular"]').click();
+check(names.length === 2 && names.includes('Frozen Prawns 1kg') && names.includes('Sparkling Water 10pk'), 'Guests shows only guest items', names.join(', '));
+await page.locator('#col-filter').selectOption('regular');
+await expandAll();
 names = await page.locator('.item .name').allInnerTexts();
-check(!names.includes('Frozen Prawns 1kg') && names.includes('Greek Yoghurt'), 'Regular filter hides guest items');
-await page.locator('[data-col="all"]').click();
-const prawnSub = await page.locator('[data-view=list]').click().then(() => page.locator('.item', { hasText: 'Frozen Prawns' }).locator('.sub').innerText());
-check(/Guests/.test(prawnSub), 'flat list under All labels non-Regular items with their collection', prawnSub);
-await page.locator('[data-view=grouped]').click();
+check(!names.includes('Frozen Prawns 1kg') && names.includes('Greek Yoghurt'), 'Regular hides guest items');
+await page.locator('#col-filter').selectOption('all');
+await expandAll();
+const prawnSub = await page.locator('.item', { hasText: 'Frozen Prawns' }).locator('.sub').innerText();
+check(/Guests/.test(prawnSub), 'under All collections, non-Regular items show their collection', prawnSub);
 
-// ---------- 3. Move an item to another collection; set bought-on ----------
+// ---------- 3. Move an item to another collection, bought last month ----------
 await page.locator('.item', { hasText: 'Spaghetti' }).click();
 await page.waitForSelector('#e-col');
-check(await page.locator('#e-col').inputValue() === 'regular', 'editor shows Regular for an old item');
-check(await page.locator('#e-bought').inputValue() === '', 'bought-on is blank by default');
+check(await page.locator('#e-col').inputValue() === 'regular', 'editor shows Regular');
+check(await page.locator('#e-bought').count() === 1, 'editor has a bought-on field');
 await page.locator('#e-col').selectOption('__new__');
 await page.waitForSelector('#col-name');
 await page.locator('#col-name').fill('Stocking up');
 await page.locator('#col-save').click();
 await page.waitForFunction(() => document.querySelectorAll('.sheet-wrap.open').length === 1);
-const colVal = await page.locator('#e-col').inputValue();
-check(colVal.startsWith('col-'), 'new collection created from the editor and selected', colVal);
-await page.locator('#e-bought').fill('2026-11-01');
+const stockId = await page.locator('#e-col').inputValue();
+check(stockId.startsWith('col-'), 'new collection created from the editor and selected', stockId);
+await page.locator('#e-bought').fill(prevISO);
 await page.locator('#e-save').click();
 await closed();
 await page.reload({ waitUntil: 'networkidle' });
-await page.waitForSelector('.item');
-await page.locator('.col-chips .chip', { hasText: 'Stocking up' }).click();
+await page.waitForSelector('.cat-group');
+await page.locator('#col-filter').selectOption(stockId);
+await expandAll();
 names = await page.locator('.item .name').allInnerTexts();
 check(names.length === 1 && names[0] === 'Spaghetti 500g', 'moved item shows under Stocking up after reload', names.join(', '));
 await page.locator('.item', { hasText: 'Spaghetti' }).click();
-await page.waitForSelector('#e-bought');
-check(await page.locator('#e-bought').inputValue() === '2026-11-01', 'bought-on date saved');
-await page.locator('.sheet-back').click();
+await page.waitForSelector('#e-used');
+check(await page.locator('#e-bought').inputValue() === prevISO, 'bought-on date saved');
+await page.locator('#e-used').click(); // use 1 of 2 today; it still counts toward last month's groceries
 await closed();
 
-// ---------- 4. Stats per collection ----------
+// ---------- 4. Stats: one set of figures for Collection + Category + Period ----------
 await page.locator('[data-tab=stats]').click();
-await page.waitForSelector('.col-stats');
-const statText = await page.locator('.col-stat').allInnerTexts();
-check(statText.length === 4, 'stats show All + 3 collections', String(statText.length));
-const guestsStat = statText.find(t => /Guests/.test(t)) ?? '';
-check(/\$39\.00/.test(guestsStat), 'Guests spend is $39.00 (2×7.50 + 24)', guestsStat.replace(/\s+/g, ' '));
-const stockStat = statText.find(t => /Stocking up/.test(t)) ?? '';
-check(/\$3\.60/.test(stockStat), 'Stocking up spend moved with the item ($3.60)', stockStat.replace(/\s+/g, ' '));
-const allStat = statText[0];
-check(/Wasted\s*1/.test(allStat) && /Used\s*1/.test(allStat), 'All shows used and wasted counts', allStat.replace(/\s+/g, ' '));
+await page.waitForSelector('#st-period');
+check(await page.locator('.col-stats').count() === 0, 'stacked per-collection sections removed');
+check(await page.locator('#st-col').inputValue() === 'all' && await page.locator('#st-cat').inputValue() === 'all' && await page.locator('#st-period').inputValue() === 'all', 'stats dropdowns default to All / All / All time');
+const periods = await page.locator('#st-period option').allInnerTexts();
+check(periods[0] === 'This week' && periods[1] === 'This month' && periods.includes(prevLabel) && periods.at(-1) === 'All time', 'period options: week, month, earlier months with data, all time', periods.join('|'));
+const spent = () => page.locator('#st-spent').innerText();
+const cardOf = label => page.locator('#st-cards .card', { hasText: label }).innerText().then(t => t.replace(/\s+/g, ' '));
+await page.locator('#st-col').selectOption('col-guests');
+check(await spent() === '$39.00', 'Guests spend is $39.00 (2×7.50 + 24)', await spent());
+await page.locator('#st-col').selectOption(stockId);
+await page.locator('#st-period').selectOption(prevKey);
+check(await spent() === '$3.60', 'Stocking up, last month: spend $3.60 by bought-on date', await spent());
+check(/^1 Used \$1\.80/.test(await cardOf('Used')), 'used today but counted in last month (bought then)', await cardOf('Used'));
+check(/^1 Still in stock \$1\.80/.test(await cardOf('Still in stock')), 'still in stock: 1 item worth $1.80', await cardOf('Still in stock'));
+await page.locator('#st-period').selectOption('month');
+check(await spent() === '$0.00' && /^0 Used/.test(await cardOf('Used')), 'This month excludes groceries bought last month', `${await spent()} / ${await cardOf('Used')}`);
+await page.locator('#st-col').selectOption('all');
+await page.locator('#st-cat').selectOption('frozen');
+await page.locator('#st-period').selectOption('all');
+check(await spent() === '$27.80', 'All collections + Frozen + All time = $27.80 (peas 3.80 + prawns 24)', await spent());
+await page.locator('#st-col').selectOption('col-guests');
+check(await spent() === '$24.00', 'Guests + Frozen = $24.00', await spent());
+await page.locator('#st-col').selectOption('all');
+await page.locator('#st-cat').selectOption('all');
+check(/^1 Wasted \$3\.50/.test(await cardOf('Wasted')) && /^2 Used/.test(await cardOf('Used')), 'All: wasted 1 ($3.50), used 2', `${await cardOf('Wasted')} / ${await cardOf('Used')}`);
+check(/^1 Expired/.test(await cardOf('Expired')), 'expired count shown', await cardOf('Expired'));
+check(await page.locator('.spend-list li').count() >= 5, 'by-category breakdown follows the filters');
+
+// ---------- 4b. Clear pantry: items + spend + used/binned history ----------
+await page.locator('[data-tab=items]').click();
+await page.locator('#col-filter').selectOption(stockId);
+await page.locator('#clear-pantry').click();
+await page.waitForSelector('#clear-yes');
+const warn = await page.locator('.warn-box').innerText();
+check(/1 item/.test(warn) && /Stocking up/.test(warn), 'clear confirm states the count and scope', warn.replace(/\s+/g, ' '));
+await page.locator('#clear-yes').click();
+await closed();
+m = await readDb();
+const spagId = m.items.find(i => /Spaghetti/.test(i.name))?.id;
+check(!spagId && !m.purchases.some(p => /Spaghetti/.test(p.name)) && !m.events.some(e => /Spaghetti/.test(e.name)), 'cleared item, its purchases and its used history are deleted');
+check(m.items.length === 10, 'other items untouched', `${m.items.length} left`);
+await page.locator('#col-filter').selectOption('all');
+await page.locator('#q').fill('Tim');
+check(/Clear pantry \(1\)/.test(await page.locator('#clear-pantry').innerText()), 'clear follows the search', await page.locator('#clear-pantry').innerText());
+await page.locator('#clear-pantry').click();
+await page.locator('#clear-yes').click();
+await closed();
+await page.locator('#q').fill('');
+m = await readDb();
+check(m.items.length === 9 && !m.items.some(i => /Tim Tams/.test(i.name)), 'search-scoped clear deleted just Tim Tams');
+await page.locator('[data-tab=stats]').click();
+await page.waitForSelector('#st-spent');
+check(await spent() === '$76.10', 'Stats total drops after clearing ($84.20 − 3.60 − 4.50)', await spent());
 
 // ---------- 5. Settings: rename and delete built-in categories and collections ----------
 await page.locator('[data-tab=settings]').click();
@@ -141,13 +232,14 @@ await page.locator('[data-delcol="col-guests"]').click();
 await page.waitForTimeout(200);
 check(await page.locator('[data-delcol="col-guests"]').count() === 0, 'Guests collection deleted');
 await page.reload({ waitUntil: 'networkidle' });
-await page.waitForSelector('.item');
+await page.waitForSelector('.cat-group');
+await expandAll();
 const groups = await page.locator('.cat-h-name').allInnerTexts();
 check(groups.includes('Milk & Cheese') && !groups.includes('Produce'), 'rename and delete persist after reload', groups.join(', '));
 check(groups.includes('Uncategorised'), 'spinach from deleted Produce shows under Uncategorised', groups.join(', '));
 names = await page.locator('.item .name').allInnerTexts();
 check(names.includes('Baby Spinach') && names.includes('Frozen Prawns 1kg'), 'no items lost after deleting categories and a collection');
-check(await page.locator('.col-chips .chip', { hasText: 'Guests' }).count() === 0, 'deleted collection gone from filter');
+check(!(await page.locator('#col-filter option').allInnerTexts()).some(t => /Guests/.test(t)), 'deleted collection gone from the dropdown');
 await page.locator('[data-tab=settings]').click();
 await page.locator('[data-editcol="regular"]').click();
 await page.locator('#col-name').fill('Home');
@@ -180,7 +272,8 @@ await page.locator('#col-save').click();
 await page.waitForFunction(() => document.querySelectorAll('.sheet-wrap.open').length === 1);
 await page.locator('#rv-add').click();
 await closed();
-await page.locator('.col-chips .chip', { hasText: 'Guests – Jan' }).click();
+await page.locator('#col-filter').selectOption({ label: 'Guests – Jan' });
+await expandAll();
 names = await page.locator('.item .name').allInnerTexts();
 check(names.length === 2 && names.includes('Party Pies'), 'receipt items added to the new collection', names.join(', '));
 await page.locator('.item', { hasText: 'Party Pies' }).click();

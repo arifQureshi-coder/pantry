@@ -11,13 +11,13 @@ const scanner = () => import('./scanner');
 // ---------- state ----------
 type Tab = 'items' | 'shopping' | 'stats' | 'settings';
 type StatusFilter = 'all' | 'soon' | 'expired' | 'fresh' | 'none' | 'attention' | 'noexpiry';
-type ItemsView = 'grouped' | 'list' | 'grid';
-const collapsedCats = new Set<string>();
-function listLikeView(): 'grouped' | 'list' { return S.settings.view === 'list' ? 'list' : 'grouped'; }
-function isItemsView(v: unknown): v is ItemsView { return v === 'grouped' || v === 'list' || v === 'grid'; }
+/** Two home views: Grid (default) and List (grouped by category, headers folded until tapped). */
+type ItemsView = 'grid' | 'list';
+const expandedCats = new Set<string>();
+function isItemsView(v: unknown): v is ItemsView { return v === 'list' || v === 'grid'; }
 async function applyView(v: ItemsView) {
-  S.view = v; S.cat = 'all';
-  S.settings.view = v; await db.saveSettings(S.settings);
+  S.view = v; S.cat = 'all'; expandedCats.clear();
+  S.settings.homeView = v; await db.saveSettings(S.settings);
   render();
 }
 
@@ -25,7 +25,7 @@ const S = {
   tab: 'items' as Tab,
   items: [] as Item[], cats: [] as Category[], cols: [] as Collection[], col: 'all' as string, shop: [] as ShopItem[], events: [] as WasteEvent[], purchases: [] as Purchase[],
   settings: db.DEFAULT_SETTINGS as Settings,
-  q: '', cat: 'all', loc: 'all' as 'all' | Location, sort: 'expiry' as 'expiry' | 'name' | 'added', view: 'grouped' as ItemsView,
+  q: '', cat: 'all', loc: 'all' as 'all' | Location, sort: 'expiry' as 'expiry' | 'name' | 'added', view: 'grid' as ItemsView,
   status: 'all' as StatusFilter,
 };
 const $ = <T extends HTMLElement = HTMLElement>(sel: string, root: ParentNode = document) => root.querySelector(sel) as T;
@@ -61,7 +61,7 @@ function lastPaid(opts: { barcode?: string; name?: string }): number | undefined
 }
 async function recordPurchase(i: Item, quantity: number, unitPrice: number, at = Date.now(), total?: number) {
   if (!(unitPrice > 0) || quantity <= 0) return;
-  const p: Purchase = { id: db.uid(), itemId: i.id, name: i.name, barcode: i.barcode, categoryId: i.categoryId, collectionId: colId(i), unitPrice, quantity, total: total ?? Math.round(unitPrice * quantity * 100) / 100, at };
+  const p: Purchase = { id: db.uid(), itemId: i.id, name: i.name, barcode: i.barcode, categoryId: i.categoryId, collectionId: colId(i), boughtAt: db.boughtTime(i), unitPrice, quantity, total: total ?? Math.round(unitPrice * quantity * 100) / 100, at };
   await db.put('purchases', p); S.purchases.push(p);
 }
 
@@ -70,7 +70,7 @@ async function load() {
   S.cols = await db.ensureCollections();
   if (S.col !== 'all' && !S.cols.some(c => c.id === S.col)) S.col = 'all';
   [S.items, S.shop, S.events, S.settings, S.purchases] = await Promise.all([db.getAll<Item>('items'), db.getAll<ShopItem>('shopping'), db.getAll<WasteEvent>('events'), db.getSettings(), db.getAll<Purchase>('purchases')]);
-  S.view = isItemsView(S.settings.view) ? S.settings.view : 'grouped';
+  S.view = isItemsView(S.settings.homeView) ? S.settings.homeView : 'grid';
   for (const i of S.items) if (!i.collectionId) i.collectionId = db.REGULAR_ID;
 }
 
@@ -231,16 +231,14 @@ function itemsView() {
   return `
     <header class="hdr"><h1>Pantry</h1>
       <div class="seg small" role="tablist">
-        <button data-view="grouped" class="${S.view === 'grouped' ? 'on' : ''}" aria-label="Grouped by category">Groups</button>
-        <button data-view="list" class="${S.view === 'list' ? 'on' : ''}" aria-label="Flat list">List</button>
         <button data-view="grid" class="${S.view === 'grid' ? 'on' : ''}" aria-label="Category grid">Grid</button>
+        <button data-view="list" class="${S.view === 'list' ? 'on' : ''}" aria-label="List by category">List</button>
       </div>
     </header>
     ${(() => { const check = datesToCheck(); return check.length ? `<button class="banner check" id="dates-check">
         <span>📅</span><span><b>${check.length} date${check.length > 1 ? 's' : ''} to check</b><br><small>${esc(check.slice(0, 3).map(i => i.name).join(', '))}${check.length > 3 ? '…' : ''}</small></span><span>›</span></button>` : ''; })()}
     ${soon.length ? `<button class="banner ${soon.some(i => freshness(i) === 'expired') ? 'red' : ''}" id="soon">
         <span>⏰</span><span><b>${soon.length} item${soon.length > 1 ? 's' : ''} expiring soon</b><br><small>${esc(soon.slice(0, 3).map(i => i.name).join(', '))}${soon.length > 3 ? '…' : ''}</small></span><span>›</span></button>` : ''}
-    ${collectionChips()}
     <div class="search"><span>🔎</span><input id="q" type="search" placeholder="Search items" value="${esc(S.q)}" autocomplete="off"></div>
     <div class="row-between">
       <button class="btn-filter ${n ? 'on' : ''}" id="filter-btn" aria-label="${n ? `Filter, ${n} active` : 'Filter'}">Filter${n ? `<b class="fbadge">${n}</b>` : ''}</button>
@@ -249,21 +247,21 @@ function itemsView() {
         <option value="name" ${S.sort === 'name' ? 'selected' : ''}>⇅ A–Z</option>
         <option value="added" ${S.sort === 'added' ? 'selected' : ''}>⇅ Newest</option>
       </select>
+      ${collectionSelect()}
     </div>
     ${activeFilterChips()}
     <div id="results">${resultsHtml()}</div>`;
 }
-function collectionChips() {
-  const n = (id: string) => active().filter(i => id === 'all' || colId(i) === id).length;
-  const chip = (id: string, label: string) => `<button type="button" class="chip ${S.col === id ? 'on' : ''}" data-col="${esc(id)}">${esc(label)} <span class="n">${n(id)}</span></button>`;
-  return `<div class="chips col-chips" role="tablist" aria-label="Collection">${chip('all', 'All')}${sortedCols().map(c => chip(c.id, c.name)).join('')}</div>`;
+function collectionSelect() {
+  return `<select id="col-filter" class="sort col-filter" aria-label="Collection">
+    <option value="all" ${S.col === 'all' ? 'selected' : ''}>All collections</option>
+    ${sortedCols().map(c => `<option value="${esc(c.id)}" ${S.col === c.id ? 'selected' : ''}>${esc(c.name)}</option>`).join('')}</select>`;
 }
 function resultsHtml() {
   const list = filtered();
   if (S.view === 'grid' && S.cat === 'all' && !S.q) return gridView();
   if (!list.length) return emptyState();
-  if (S.view === 'list') return `<ul class="list">${list.map(i => itemRow(i)).join('')}</ul>`;
-  return groupedView(list);
+  return groupedView(list) + clearButton(list.length);
 }
 function groupedView(list: Item[]) {
   const byId = new Map<string, Item[]>();
@@ -272,8 +270,10 @@ function groupedView(list: Item[]) {
     const arr = byId.get(id) ?? []; arr.push(i); byId.set(id, arr);
   }
   const groups = displayCats().map(c => ({ c, items: byId.get(c.id) ?? [] })).filter(g => g.items.length);
+  // Folded by default; open while searching or when only one category is shown.
+  const openAll = !!S.q.trim() || groups.length === 1;
   return groups.map(({ c, items }) => {
-    const closed = collapsedCats.has(c.id);
+    const closed = !openAll && !expandedCats.has(c.id);
     const levels = items.map(freshness);
     const alert = levels.includes('expired') ? 'expired' : levels.includes('soon') ? 'soon' : '';
     return `<section class="cat-group${closed ? ' closed' : ''}">
@@ -294,8 +294,12 @@ function gridView() {
     return { c, n: its.length, alert: its.some(i => ['soon', 'expired'].includes(freshness(i))) };
   }).filter(x => x.n);
   if (!counts.length) return emptyState();
-  return `<div class="grid">${counts.map(({ c, n, alert }) => `
-    <button class="tile" data-cat="${c.id}">${alert ? '<i class="dot"></i>' : ''}<span class="tile-icon">${c.icon}</span><span class="tile-name">${esc(c.name)}</span><span class="tile-n">${n} item${n > 1 ? 's' : ''}</span></button>`).join('')}</div>`;
+  const shown = itemsMatching().length;
+  return clearButton(shown, `<div class="grid">${counts.map(({ c, n, alert }) => `
+    <button class="tile" data-cat="${c.id}">${alert ? '<i class="dot"></i>' : ''}<span class="tile-icon">${c.icon}</span><span class="tile-name">${esc(c.name)}</span><span class="tile-n">${n} item${n > 1 ? 's' : ''}</span></button>`).join('')}</div>`);
+}
+function clearButton(n: number, before = '') {
+  return `${before}<div class="clear-wrap"><button type="button" class="btn ghost danger" id="clear-pantry">🗑️ Clear pantry (${n})</button></div>`;
 }
 
 function emptyState() {
@@ -382,9 +386,9 @@ function filtered() {
 function bindItems() {
   const q = $<HTMLInputElement>('#q');
   // Only re-render the results while typing so the iOS keyboard stays open.
-  q?.addEventListener('input', () => { S.q = q.value; collapsedCats.clear(); $('#results').innerHTML = resultsHtml(); bindResults(); });
+  q?.addEventListener('input', () => { S.q = q.value; $('#results').innerHTML = resultsHtml(); bindResults(); });
   document.querySelectorAll<HTMLElement>('[data-view]').forEach(b => b.onclick = () => applyView(b.dataset.view as ItemsView));
-  document.querySelectorAll<HTMLElement>('[data-col]').forEach(b => b.onclick = () => { S.col = b.dataset.col!; collapsedCats.clear(); render(); });
+  $<HTMLSelectElement>('#col-filter')?.addEventListener('change', e => { S.col = (e.target as HTMLSelectElement).value; render(); });
   $('#soon')?.addEventListener('click', () => showStatus('attention'));
   $('#dates-check')?.addEventListener('click', openDatesSheet);
   $('#filter-btn')?.addEventListener('click', openFilterSheet);
@@ -399,7 +403,7 @@ function bindItems() {
   bindResults();
 }
 function showStatus(status: StatusFilter) {
-  S.tab = 'items'; if (S.view === 'grid') S.view = listLikeView(); S.cat = 'all'; S.loc = 'all'; S.col = 'all'; S.q = ''; S.sort = 'expiry'; S.status = status;
+  S.tab = 'items'; if (S.view === 'grid') S.view = 'list'; S.cat = 'all'; S.loc = 'all'; S.col = 'all'; S.q = ''; S.sort = 'expiry'; S.status = status;
   render(); window.scrollTo(0, 0);
 }
 function openFilterSheet() {
@@ -413,7 +417,7 @@ function openFilterSheet() {
     $('#f-clear', s.el).onclick = () => { draft.status = 'all'; draft.cat = 'all'; draft.loc = 'all'; paint(); };
     $('#f-apply', s.el).onclick = () => {
       S.status = draft.status; S.cat = draft.cat; S.loc = draft.loc;
-      if (S.view === 'grid' && (S.cat !== 'all' || S.status !== 'all' || S.loc !== 'all')) S.view = listLikeView();
+      if (S.view === 'grid' && (S.cat !== 'all' || S.status !== 'all' || S.loc !== 'all')) S.view = 'list';
       s.close(); render();
     };
   };
@@ -443,13 +447,53 @@ function filterSheetHtml(f: FilterSet) {
     </div>`;
 }
 function bindResults() {
-  document.querySelectorAll<HTMLElement>('[data-cat]').forEach(b => b.onclick = () => { S.cat = b.dataset.cat!; if (S.view === 'grid') S.view = listLikeView(); render(); });
+  document.querySelectorAll<HTMLElement>('[data-cat]').forEach(b => b.onclick = () => { S.cat = b.dataset.cat!; if (S.view === 'grid') S.view = 'list'; render(); });
   document.querySelectorAll<HTMLElement>('[data-toggle]').forEach(b => b.onclick = () => {
     const id = b.dataset.toggle!;
-    if (collapsedCats.has(id)) collapsedCats.delete(id); else collapsedCats.add(id);
+    if (expandedCats.has(id)) expandedCats.delete(id); else expandedCats.add(id);
     $('#results').innerHTML = resultsHtml(); bindResults();
   });
+  $('#clear-pantry')?.addEventListener('click', openClearPantry);
   document.querySelectorAll<HTMLElement>('.item').forEach(li => li.onclick = () => editItem(S.items.find(i => i.id === li.dataset.id)!));
+}
+
+// ---------- clear pantry ----------
+function filterScopeText() {
+  const bits: string[] = [S.col === 'all' ? 'all collections' : `the “${colOf(S.col).name}” collection`];
+  if (S.cat !== 'all') bits.push(`category ${catOf(S.cat).name}`);
+  if (S.loc !== 'all') bits.push(`stored in ${S.loc}`);
+  if (S.status !== 'all') bits.push(STATUS_LABEL[S.status].toLowerCase());
+  if (S.q.trim()) bits.push(`matching “${S.q.trim()}”`);
+  return bits.join(', ');
+}
+/** Delete every item shown under the current filters, plus all its spend and used/binned history. */
+async function clearItems(ids: Set<string>) {
+  for (const id of ids) { await cancelExpiryJobs(id); await db.del('items', id); }
+  const purchases = S.purchases.filter(p => p.itemId && ids.has(p.itemId));
+  for (const p of purchases) await db.del('purchases', p.id);
+  const events = S.events.filter(e => e.itemId && ids.has(e.itemId));
+  for (const e of events) await db.del('events', e.id);
+  S.items = S.items.filter(i => !ids.has(i.id));
+  S.purchases = S.purchases.filter(p => !(p.itemId && ids.has(p.itemId)));
+  S.events = S.events.filter(e => !(e.itemId && ids.has(e.itemId)));
+  return { purchases: purchases.length, events: events.length };
+}
+function openClearPantry() {
+  const list = itemsMatching();
+  const n = list.length;
+  if (!n) return toast('Nothing to clear');
+  const units = list.reduce((t, i) => t + i.quantity, 0);
+  const s = sheet(`<div class="warn-box">
+      <p><b>This permanently deletes ${n} item${n === 1 ? '' : 's'}</b>${units !== n ? ` (${units} in total)` : ''} from ${esc(filterScopeText())}.</p>
+      <p>Their spending and used/binned history are deleted too, so they also disappear from Stats. This can't be undone.</p>
+    </div>
+    <p class="muted">Tip: export a backup in Settings first if you might want them back.</p>
+    <div class="sheet-foot"><button class="btn ghost" data-close>Cancel</button><button class="btn danger-fill" id="clear-yes">Delete ${n} item${n === 1 ? '' : 's'}</button></div>`, { title: 'Clear pantry?' });
+  $('#clear-yes', s.el).onclick = async () => {
+    if (!confirm(`Delete ${n} item${n === 1 ? '' : 's'} and all their history? This can't be undone.`)) return;
+    await clearItems(new Set(list.map(i => i.id)));
+    s.close(); render(); toast(`Deleted ${n} item${n === 1 ? '' : 's'}`);
+  };
 }
 
 // ---------- add flows ----------
@@ -649,6 +693,12 @@ async function saveItem(i: Item) {
       p.categoryId = i.categoryId; await db.put('purchases', p);
     }
   }
+  // Bought-on date changed: keep the stored date on its records in step (used if the item is deleted later).
+  if (prev && prev.boughtOn !== i.boughtOn) {
+    const at = db.boughtTime(i);
+    for (const p of S.purchases.filter(x => x.itemId === i.id)) { p.boughtAt = at; await db.put('purchases', p); }
+    for (const e of S.events.filter(x => x.itemId === i.id)) { e.boughtAt = at; await db.put('events', e); }
+  }
   // Moved to another collection: its spend and used/binned history move with it.
   if (prevCol && prevCol !== i.collectionId) {
     for (const p of S.purchases.filter(x => x.itemId === i.id)) { p.collectionId = i.collectionId; await db.put('purchases', p); }
@@ -712,7 +762,7 @@ async function deleteCategory(id: string) {
   }
   await db.del('categories', id);
   S.cats = S.cats.filter(c => c.id !== id);
-  collapsedCats.delete(id);
+  expandedCats.delete(id);
   if (S.cat === id) S.cat = 'all';
 }
 function openCategorySheet(selectedId: string, onPick: (id: string) => void) {
@@ -892,7 +942,7 @@ function editItem(existing: Item | null, prefill: Partial<Item> = {}, autoCat = 
     await db.del('items', it.id); S.items = S.items.filter(x => x.id !== it.id); s.close(); render();
   });
   const finish = async (type: 'used' | 'binned') => {
-    const ev: WasteEvent = { id: db.uid(), itemId: existing!.id, name: existing!.name, categoryId: existing!.categoryId, collectionId: colId(S.items.find(x => x.id === existing!.id) ?? existing!), type, at: Date.now(), unitPrice: existing!.price, quantity: 1 };
+    const ev: WasteEvent = { id: db.uid(), itemId: existing!.id, name: existing!.name, categoryId: existing!.categoryId, collectionId: colId(S.items.find(x => x.id === existing!.id) ?? existing!), boughtAt: db.boughtTime(existing!), type, at: Date.now(), unitPrice: existing!.price, quantity: 1 };
     await db.put('events', ev); S.events.push(ev);
     const cur = { ...(S.items.find(x => x.id === existing!.id) ?? existing!) };
     if (cur.quantity > 1) { cur.quantity--; await saveItem(cur); toast(`${type === 'used' ? 'Used' : 'Binned'} one. ${cur.quantity} left.`); }
@@ -1130,6 +1180,10 @@ function bindShopping() {
 }
 
 // ---------- stats ----------
+// Every figure is tied to when the groceries were BOUGHT (bought-on date, else the day they were added),
+// so "Oct 2026" means groceries bought in October: their spend, how much was used or binned, and what is left now.
+type Period = 'week' | 'month' | 'all' | string; // string = 'YYYY-MM'
+const ST = { col: 'all', cat: 'all', period: 'all' as Period };
 function startOfWeek(d = new Date()) {
   const x = new Date(d.getFullYear(), d.getMonth(), d.getDate());
   const day = x.getDay();
@@ -1137,68 +1191,102 @@ function startOfWeek(d = new Date()) {
   return x.getTime();
 }
 function startOfMonth(d = new Date()) { return new Date(d.getFullYear(), d.getMonth(), 1).getTime(); }
-const spendSince = (from: number) => S.purchases.filter(p => p.at >= from).reduce((s, p) => s + p.total, 0);
-
-function statsView() {
-  const since = Date.now() - 30 * 864e5;
-  const recent = S.events.filter(e => e.at >= since);
-  const used = recent.filter(e => e.type === 'used').length, binned = recent.filter(e => e.type === 'binned').length;
-  const pct = used + binned ? Math.round((binned / (used + binned)) * 100) : 0;
-  const top = Object.entries(S.events.filter(e => e.type === 'binned').reduce<Record<string, number>>((m, e) => (m[e.name] = (m[e.name] ?? 0) + 1, m), {})).sort((a, b) => b[1] - a[1]).slice(0, 5);
-  const a = active();
-  const week = spendSince(startOfWeek()), month = spendSince(startOfMonth());
-  const byCat = Object.entries(S.purchases.filter(p => p.at >= startOfMonth()).reduce<Record<string, number>>((m, p) => { const k = catOf(p.categoryId).id; m[k] = (m[k] ?? 0) + p.total; return m; }, {})).sort((x, y) => y[1] - x[1]);
-  const catMax = byCat[0]?.[1] ?? 0;
-  const wasted = S.events.filter(e => e.type === 'binned' && e.at >= startOfMonth()).reduce((s, e) => s + (e.unitPrice ?? 0) * (e.quantity ?? 1), 0);
-  return `<header class="hdr"><h1>Stats</h1></header>
-    <div class="cards">
-      <div class="card"><b>${a.length}</b><span>In stock</span></div>
-      <button class="card amber" data-jump="soon" aria-label="Show items expiring soon"><b>${a.filter(i => freshness(i) === 'soon').length}</b><span>Expiring soon</span></button>
-      <button class="card red" data-jump="expired" aria-label="Show expired items"><b>${a.filter(i => freshness(i) === 'expired').length}</b><span>Expired</span></button>
-    </div>
-    <section class="panel"><h3>Spending</h3>
-      <div class="cards two">
-        <div class="card"><b>${money(week)}</b><span>This week</span></div>
-        <div class="card"><b>${money(month)}</b><span>This month</span></div>
-      </div>
-      ${byCat.length ? `<h4 class="sub-h">This month by category</h4>
-        <ul class="spend-list">${byCat.map(([id, n]) => { const c = catOf(id); return `<li><span>${c.icon} ${esc(c.name)}</span><b>${money(n)}</b><i class="sbar" style="width:${catMax ? Math.max(4, (n / catMax) * 100) : 0}%"></i></li>`; }).join('')}</ul>` : '<p class="muted">Add a price when you save an item, or scan a receipt, to start tracking spend.</p>'}
-      <p class="waste-line">🗑️ <b>${money(wasted)}</b> wasted on binned items this month</p>
-    </section>
-    ${collectionStatsHtml()}
-    <section class="panel"><h3>Last 30 days</h3>
-      <div class="bar"><i style="width:${100 - pct}%"></i></div>
-      <div class="row-between"><span>✅ Used <b>${used}</b></span><span>🗑️ Binned <b>${binned}</b></span></div>
-      <p class="muted">${used + binned ? `You binned ${pct}% of what you finished.` : 'Tap “Used it” or “Binned it” on an item to start tracking waste.'}</p></section>
-    ${top.length ? `<section class="panel"><h3>Most often binned</h3><ul class="plain">${top.map(([n, c]) => `<li><span>${esc(n)}</span><b>${c}×</b></li>`).join('')}</ul></section>` : ''}`;
+const monthKey = (t: number) => { const d = new Date(t); return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}`; };
+const monthLabel = (k: string) => { const [y, m] = k.split('-').map(Number); return new Date(y, m - 1, 1).toLocaleDateString('en-AU', { month: 'short', year: 'numeric' }); };
+function inPeriod(t: number, period: Period) {
+  if (period === 'all') return true;
+  if (period === 'week') return t >= startOfWeek();
+  if (period === 'month') return t >= startOfMonth();
+  return monthKey(t) === period;
 }
-function collectionTotals(id: string | 'all') {
-  const inCol = (x: { collectionId?: string }) => id === 'all' || colId(x) === id;
-  const ev = S.events.filter(inCol);
-  const evValue = (type: 'used' | 'binned') => ev.filter(e => e.type === type).reduce((s, e) => s + (e.unitPrice ?? 0) * (e.quantity ?? 1), 0);
-  const left = active().filter(inCol);
+type Rec = { itemId?: string; categoryId: string; collectionId?: string; at: number; boughtAt?: number };
+/** A spend or used/binned record's item, category, collection and bought time (live item first, else what the record kept). */
+function recInfo(r: Rec) {
+  const item = r.itemId ? S.items.find(i => i.id === r.itemId) : undefined;
   return {
-    spent: S.purchases.filter(inCol).reduce((s, p) => s + p.total, 0),
-    used: ev.filter(e => e.type === 'used').reduce((s, e) => s + (e.quantity ?? 1), 0), usedValue: evValue('used'),
-    wasted: ev.filter(e => e.type === 'binned').reduce((s, e) => s + (e.quantity ?? 1), 0), wastedValue: evValue('binned'),
-    left: left.reduce((s, i) => s + i.quantity, 0), leftValue: left.reduce((s, i) => s + (i.price ?? 0) * i.quantity, 0),
+    cat: catKey(item?.categoryId ?? r.categoryId),
+    col: colId(item ?? r),
+    bought: item ? db.boughtTime(item) : r.boughtAt ?? r.at,
   };
 }
-function collectionStatsHtml() {
-  const row = (id: string, name: string) => {
-    const t = collectionTotals(id);
-    return `<li class="col-stat" data-colstat="${esc(id)}"><div class="col-stat-h"><b>${esc(name)}</b><b>${money(t.spent)}</b></div>
-      <div class="col-stat-grid"><span>✅ Used <b>${t.used}</b><small>${money(t.usedValue)}</small></span>
-        <span>🗑️ Wasted <b>${t.wasted}</b><small>${money(t.wastedValue)}</small></span>
-        <span>🧺 Left <b>${t.left}</b><small>${money(t.leftValue)}</small></span></div></li>`;
+type StatSel = { col: string; cat: string; period: Period };
+function matchesSel(x: { cat: string; col: string; bought: number }, sel: StatSel) {
+  return (sel.col === 'all' || x.col === sel.col) && (sel.cat === 'all' || x.cat === sel.cat) && inPeriod(x.bought, sel.period);
+}
+function statFigures(sel: StatSel) {
+  const purchases = S.purchases.filter(p => matchesSel(recInfo(p), sel));
+  const events = S.events.filter(e => matchesSel(recInfo(e), sel));
+  const items = active().filter(i => matchesSel({ cat: catKey(i.categoryId), col: colId(i), bought: db.boughtTime(i) }, sel));
+  const evSum = (type: 'used' | 'binned') => {
+    const es = events.filter(e => e.type === type);
+    return { n: es.reduce((t, e) => t + (e.quantity ?? 1), 0), value: es.reduce((t, e) => t + (e.unitPrice ?? 0) * (e.quantity ?? 1), 0) };
   };
-  return `<section class="panel"><h3>By collection</h3>
-    <p class="muted">All time. Spend is what you paid; used, wasted and left count items, with their value at the price you entered.</p>
-    <ul class="col-stats">${row('all', 'All collections')}${sortedCols().map(c => row(c.id, c.name)).join('')}</ul></section>`;
+  const itemSum = (list: Item[]) => ({ n: list.length, units: list.reduce((t, i) => t + i.quantity, 0), value: list.reduce((t, i) => t + (i.price ?? 0) * i.quantity, 0) });
+  const byCat = new Map<string, number>();
+  for (const p of purchases) { const k = recInfo(p).cat; byCat.set(k, (byCat.get(k) ?? 0) + p.total); }
+  const binnedNames = new Map<string, number>();
+  for (const e of events.filter(e => e.type === 'binned')) binnedNames.set(e.name, (binnedNames.get(e.name) ?? 0) + (e.quantity ?? 1));
+  return {
+    spent: purchases.reduce((t, p) => t + p.total, 0),
+    used: evSum('used'), wasted: evSum('binned'),
+    left: itemSum(items),
+    soon: itemSum(items.filter(i => freshness(i) === 'soon')),
+    expired: itemSum(items.filter(i => freshness(i) === 'expired')),
+    byCat: [...byCat.entries()].sort((a, b) => b[1] - a[1]),
+    topBinned: [...binnedNames.entries()].sort((a, b) => b[1] - a[1]).slice(0, 5),
+  };
+}
+/** Earlier months (before this one) that have any groceries bought in them, newest first. */
+function dataMonths() {
+  const keys = new Set<string>();
+  for (const i of S.items) keys.add(monthKey(db.boughtTime(i)));
+  for (const r of [...S.purchases, ...S.events]) keys.add(monthKey(recInfo(r).bought));
+  const now = monthKey(Date.now());
+  return [...keys].filter(k => k < now).sort().reverse();
+}
+function statsView() {
+  const months = dataMonths();
+  if (!['week', 'month', 'all', ...months].includes(ST.period)) ST.period = 'all';
+  if (ST.col !== 'all' && !S.cols.some(c => c.id === ST.col)) ST.col = 'all';
+  if (ST.cat !== 'all' && !displayCats().some(c => c.id === ST.cat)) ST.cat = 'all';
+  const f = statFigures(ST);
+  const opt = (v: string, label: string, cur: string) => `<option value="${esc(v)}" ${v === cur ? 'selected' : ''}>${esc(label)}</option>`;
+  const finished = f.used.n + f.wasted.n;
+  const pct = finished ? Math.round((f.wasted.n / finished) * 100) : 0;
+  const catMax = f.byCat[0]?.[1] ?? 0;
+  const card = (cls: string, label: string, n: number, value: number, jump = '') =>
+    `<${jump ? `button data-jump="${jump}"` : 'div'} class="card ${cls}"><b>${n}</b><span>${label}</span><small>${money(value)}</small></${jump ? 'button' : 'div'}>`;
+  return `<header class="hdr"><h1>Stats</h1></header>
+    <div class="stat-filters">
+      <select id="st-col" class="sort" aria-label="Collection">${opt('all', 'All collections', ST.col)}${sortedCols().map(c => opt(c.id, c.name, ST.col)).join('')}</select>
+      <select id="st-cat" class="sort" aria-label="Category">${opt('all', 'All categories', ST.cat)}${displayCats().map(c => opt(c.id, `${c.icon} ${c.name}`, ST.cat)).join('')}</select>
+      <select id="st-period" class="sort" aria-label="Period">${opt('week', 'This week', ST.period)}${opt('month', 'This month', ST.period)}${months.map(m => opt(m, monthLabel(m), ST.period)).join('')}${opt('all', 'All time', ST.period)}</select>
+    </div>
+    <p class="muted stat-note">Groceries bought in this period (by bought-on date, or the day added).</p>
+    <section class="panel"><h3>Spent</h3><p class="big-money" id="st-spent">${money(f.spent)}</p>
+      ${ST.cat === 'all' ? (f.byCat.length ? `<h4 class="sub-h">By category</h4>
+        <ul class="spend-list">${f.byCat.map(([id, n]) => { const c = catOf(id); return `<li><span>${c.icon} ${esc(c.name)}</span><b>${money(n)}</b><i class="sbar" style="width:${catMax ? Math.max(4, (n / catMax) * 100) : 0}%"></i></li>`; }).join('')}</ul>`
+        : '<p class="muted">Add a price when you save an item, or scan a receipt, to start tracking spend.</p>') : ''}
+    </section>
+    <div class="cards three" id="st-cards">
+      ${card('', 'Used', f.used.n, f.used.value)}
+      ${card('red', 'Wasted', f.wasted.n, f.wasted.value)}
+      ${card('', 'Still in stock', f.left.n, f.left.value)}
+      ${card('amber', 'Expiring soon', f.soon.n, f.soon.value, 'soon')}
+      ${card('red', 'Expired', f.expired.n, f.expired.value, 'expired')}
+    </div>
+    <section class="panel"><h3>Used vs wasted</h3>
+      <div class="bar"><i style="width:${finished ? 100 - pct : 100}%"></i></div>
+      <p class="muted">${finished ? `You binned ${pct}% of what you finished from these groceries.` : 'Tap “Used it” or “Binned it” on an item to start tracking waste.'}</p></section>
+    ${f.topBinned.length ? `<section class="panel"><h3>Most often binned</h3><ul class="plain">${f.topBinned.map(([n, c]) => `<li><span>${esc(n)}</span><b>${c}×</b></li>`).join('')}</ul></section>` : ''}`;
 }
 function bindStats() {
-  document.querySelectorAll<HTMLElement>('[data-colstat]').forEach(b => b.onclick = () => { S.tab = 'items'; S.col = b.dataset.colstat!; render(); window.scrollTo(0, 0); });
-  document.querySelectorAll<HTMLElement>('[data-jump]').forEach(b => b.onclick = () => showStatus(b.dataset.jump as StatusFilter));
+  const on = (id: string, k: keyof typeof ST) => $<HTMLSelectElement>(id)?.addEventListener('change', e => { ST[k] = (e.target as HTMLSelectElement).value; render(); });
+  on('#st-col', 'col'); on('#st-cat', 'cat'); on('#st-period', 'period');
+  document.querySelectorAll<HTMLElement>('[data-jump]').forEach(b => b.onclick = () => {
+    showStatus(b.dataset.jump as StatusFilter);
+    S.col = ST.col; S.cat = ST.cat; render();
+  });
 }
 
 // ---------- settings ----------

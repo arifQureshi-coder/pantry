@@ -33,10 +33,20 @@ await page.evaluate(() => new Promise((res, rej) => {
   r.onsuccess = r.onerror = r.onblocked = () => res();
 }));
 await page.goto(BASE + '?demo', { waitUntil: 'networkidle' });
-await page.waitForSelector('.item');
+await page.waitForSelector('.tile');
+pass('default view is the category grid');
+const views = await page.locator('[data-view]').allInnerTexts();
+if (views.join(',') !== 'Grid,List') fail(`only Grid and List views expected, got ${views.join(',')}`);
+else pass('only two views: Grid and List');
 
-if (!await page.locator('.cat-group').count()) fail('default view should be grouped by category');
-else pass('default view is grouped by category');
+await page.locator('[data-view=list]').click();
+await page.waitForSelector('.cat-group');
+const nGroups = await page.locator('.cat-group').count();
+const nClosed = await page.locator('.cat-group.closed').count();
+if (!nGroups || nGroups !== nClosed || await page.locator('.item').count()) fail(`List should start with all ${nGroups} headers folded, ${nClosed} folded`);
+else pass(`List view groups by category with all ${nGroups} headers folded`);
+const expandAll = async () => { for (const h of await page.locator('.cat-group.closed .cat-h').all()) await page.locator('.cat-group.closed .cat-h').first().click(); };
+await expandAll();
 
 const groupOf = name => page.locator('.cat-group', { has: page.locator('.item', { hasText: name }) }).locator('.cat-h-name');
 const yog = page.locator('.item', { hasText: 'Greek Yoghurt' });
@@ -57,7 +67,8 @@ if (!/\bSnacks\b/.test(afterSave)) fail(`Yoghurt should be in the Snacks group a
 else pass(`grouped under Snacks after save (${afterSave})`);
 
 await page.reload({ waitUntil: 'networkidle' });
-await page.waitForSelector('.item');
+await page.waitForSelector('.cat-group');
+await expandAll();
 
 const afterReload = await groupOf('Greek Yoghurt').innerText();
 if (!/\bSnacks\b/.test(afterReload)) fail(`Yoghurt should be in the Snacks group after reload, got "${afterReload}"`);
@@ -75,10 +86,7 @@ if (!/1 item/.test(dairyText)) fail(`Dairy grid count should be 1, got "${dairyT
 else pass(`grid Dairy count is 1`);
 
 await page.locator('[data-view=list]').click();
-await page.waitForSelector('.item');
-const flatSub = await page.locator('.item', { hasText: 'Greek Yoghurt' }).locator('.sub').innerText();
-if (!/\bSnacks\b/.test(flatSub)) fail(`flat list should show Snacks, got "${flatSub}"`);
-else pass(`flat list shows Snacks (${flatSub})`);
+await page.waitForSelector('.cat-group');
 
 await page.locator('#filter-btn').click();
 await page.waitForSelector('.sheet-wrap.open');
@@ -105,13 +113,15 @@ await page.waitForSelector('#f-clear');
 await page.locator('#f-clear').click();
 await page.locator('#f-apply').click();
 await page.waitForSelector('.sheet-wrap.open', { state: 'detached' });
+await expandAll();
 await page.locator('.item', { hasText: 'Full Cream Milk' }).click();
 await page.waitForSelector('#e-noexp');
 await page.locator('#e-noexp').check();
 await page.locator('#e-save').click();
 await page.waitForSelector('.sheet-wrap.open', { state: 'detached' });
 await page.reload({ waitUntil: 'networkidle' });
-await page.waitForSelector('.item');
+await page.waitForSelector('.cat-group');
+await expandAll();
 const milkPill = await page.locator('.item', { hasText: 'Full Cream Milk' }).locator('.pill').innerText();
 if (!/No expiry/.test(milkPill) || /No date/.test(milkPill)) fail(`milk pill should be No expiry, got "${milkPill}"`);
 else pass(`milk pill is "${milkPill.trim()}" after reload`);

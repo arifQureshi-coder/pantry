@@ -4,7 +4,7 @@ import { PRESET_CATEGORIES } from './categories';
 /** Tiny promise wrapper around IndexedDB. Everything lives on this device only. */
 const DB_NAME = 'pantry';
 const STORES = ['items', 'categories', 'shopping', 'events', 'kv', 'expiryJobs', 'purchases', 'collections'] as const;
-const DB_VERSION = 4;
+const DB_VERSION = 5;
 export const REGULAR_ID = 'regular';
 export const REGULAR: Collection = { id: REGULAR_ID, name: 'Regular', builtin: true, createdAt: 0 };
 type StoreName = typeof STORES[number];
@@ -34,6 +34,28 @@ function open(): Promise<IDBDatabase> {
           tx.objectStore('kv').put({ key: 'catsSeeded', value: true });
         }
       }
+      // v5: spend and used/binned records remember when the groceries were bought, so Stats can
+      // show "bought in October". Old used/binned records get linked to their item by name when that is unambiguous.
+      if (e.oldVersion > 0 && e.oldVersion < 5) {
+        tx.objectStore('items').getAll().onsuccess = ev => {
+          const items = (ev.target as IDBRequest<Item[]>).result;
+          const byId = new Map(items.map(i => [i.id, i]));
+          const byName = new Map<string, Item[]>();
+          for (const i of items) { const k = i.name.trim().toLowerCase(); byName.set(k, [...(byName.get(k) ?? []), i]); }
+          for (const name of ['purchases', 'events'] as const) {
+            tx.objectStore(name).openCursor().onsuccess = ce => {
+              const cur = (ce.target as IDBRequest<IDBCursorWithValue | null>).result;
+              if (!cur) return;
+              const row = { ...cur.value };
+              if (!row.itemId) { const same = byName.get(String(row.name ?? '').trim().toLowerCase()); if (same?.length === 1) row.itemId = same[0].id; }
+              const item = row.itemId ? byId.get(row.itemId) : undefined;
+              if (row.boughtAt == null) row.boughtAt = item ? boughtTime(item) : row.at;
+              cur.update(row);
+              cur.continue();
+            };
+          }
+        };
+      }
     };
     r.onsuccess = () => res(r.result);
     r.onerror = () => rej(r.error);
@@ -54,7 +76,7 @@ export interface ExpiryJob { id: string; itemId: string; photo: Blob; addedAt: n
 
 export const DEFAULT_SETTINGS: Settings = {
   provider: 'gemini', geminiKey: '', geminiModel: 'gemini-3.6-flash',
-  openaiKey: '', openaiModel: 'gpt-4o-mini', leadDays: 3, view: 'grouped',
+  openaiKey: '', openaiModel: 'gpt-4o-mini', leadDays: 3, homeView: 'grid',
 };
 export async function getSettings(): Promise<Settings> {
   const row = await req((await store('kv')).get('settings')) as { key: string; value: Settings } | undefined;
@@ -102,4 +124,10 @@ export async function importData(b: Backup) {
 export function withCollection(store: string, row: any) {
   if ((store === 'items' || store === 'purchases' || store === 'events') && row && !row.collectionId) return { ...row, collectionId: REGULAR_ID };
   return row;
+}
+
+/** When an item was bought: its bought-on date (midday, local time), else when it was added to the app. */
+export function boughtTime(i: { boughtOn?: string; addedAt: number }) {
+  if (i.boughtOn && /^\d{4}-\d{2}-\d{2}$/.test(i.boughtOn)) { const [y, m, d] = i.boughtOn.split('-').map(Number); return new Date(y, m - 1, d, 12).getTime(); }
+  return i.addedAt;
 }

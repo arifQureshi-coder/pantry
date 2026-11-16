@@ -39,10 +39,12 @@ export interface Settings {
   openaiModel: string;
   leadDays: number;
   lastNotified?: string;   // yyyy-mm-dd, avoid repeat notifications on the same day
-  view?: 'grouped' | 'list' | 'grid';
+  view?: 'grouped' | 'list' | 'grid'; // old (v8) setting, no longer read
+  homeView?: 'grid' | 'list';
 }
 
-export interface WasteEvent { id: string; itemId?: string; name: string; categoryId: string; collectionId?: string; type: 'used' | 'binned'; at: number; unitPrice?: number; quantity?: number; }
+/** boughtAt: when the groceries were bought (item's bought-on date, else when it was added). Stats periods use it. */
+export interface WasteEvent { id: string; itemId?: string; name: string; categoryId: string; collectionId?: string; type: 'used' | 'binned'; at: number; boughtAt?: number; unitPrice?: number; quantity?: number; }
 
 /** A recorded spend, kept even if the item is later used up or deleted. */
 export interface Purchase {
@@ -56,4 +58,5 @@ export interface Purchase {
   quantity: number;
   total: number;
   at: number;
+  boughtAt?: number;     // when the groceries were bought (see WasteEvent)
 }

@@ -261,14 +261,22 @@ button.card:active { background: var(--surface-2); }
 .toast.show { opacity: 1; transform: translate(-50%, 0); }
 
 /* collections */
-.chips.col-chips { margin: 0 -16px 10px; }
 .row-btns { display: flex; gap: 2px; flex: none; }
 .two > .field { min-width: 0; }
 .field input[type=date] { min-width: 0; }
-.col-stats { list-style: none; padding: 0; margin: 0; }
-.col-stat { padding: 10px 0; cursor: pointer; }
-.col-stat + .col-stat { border-top: 1px solid var(--border); }
-.col-stat-h { display: flex; justify-content: space-between; gap: 8px; margin-bottom: 6px; }
-.col-stat-grid { display: grid; grid-template-columns: repeat(3, 1fr); gap: 6px; font-size: 13px; color: var(--muted); }
-.col-stat-grid span { display: flex; flex-direction: column; }
-.col-stat-grid b { color: var(--text); font-size: 15px; }
+.col-filter { max-width: 42%; text-overflow: ellipsis; }
+.row-between .sort + .col-filter { margin-left: 8px; }
+
+/* clear pantry */
+.clear-wrap { display: flex; justify-content: center; margin: 18px 0 8px; }
+.warn-box { background: var(--red-bg); color: var(--red); border-radius: 14px; padding: 12px 14px; margin-bottom: 10px; }
+.warn-box p { margin: 0 0 6px; } .warn-box p:last-child { margin: 0; }
+
+/* stats filters */
+.stat-filters { display: grid; grid-template-columns: 1fr 1fr 1fr; gap: 8px; margin-bottom: 6px; }
+.stat-filters select { width: 100%; min-width: 0; text-overflow: ellipsis; }
+.stat-note { margin: 0 0 12px; font-size: 13px; }
+.big-money { font-size: 30px; font-weight: 800; margin: 0 0 8px; }
+.cards.three { grid-template-columns: repeat(3, 1fr); }
+.card small { color: var(--muted); font-size: 12px; margin-top: 2px; }
+.stat-filters select, .col-filter { background: var(--surface); border: 1px solid var(--border); border-radius: 10px; padding: 8px 10px; text-align: left; color: var(--text); min-height: 38px; }
