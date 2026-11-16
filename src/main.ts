@@ -242,12 +242,12 @@ function itemsView() {
     <div class="search"><span>🔎</span><input id="q" type="search" placeholder="Search items" value="${esc(S.q)}" autocomplete="off"></div>
     <div class="row-between">
       <button class="btn-filter ${n ? 'on' : ''}" id="filter-btn" aria-label="${n ? `Filter, ${n} active` : 'Filter'}">Filter${n ? `<b class="fbadge">${n}</b>` : ''}</button>
-      <select id="sort" class="sort" aria-label="Sort">
+      <div class="tb-right"><select id="sort" class="sort" aria-label="Sort">
         <option value="expiry" ${S.sort === 'expiry' ? 'selected' : ''}>⇅ Expiry</option>
         <option value="name" ${S.sort === 'name' ? 'selected' : ''}>⇅ A–Z</option>
         <option value="added" ${S.sort === 'added' ? 'selected' : ''}>⇅ Newest</option>
       </select>
-      ${collectionSelect()}
+      ${collectionSelect()}</div>
     </div>
     ${activeFilterChips()}
     <div id="results">${resultsHtml()}</div>`;
@@ -484,7 +484,7 @@ function openClearPantry() {
   if (!n) return toast('Nothing to clear');
   const units = list.reduce((t, i) => t + i.quantity, 0);
   const s = sheet(`<div class="warn-box">
-      <p><b>This permanently deletes ${n} item${n === 1 ? '' : 's'}</b>${units !== n ? ` (${units} in total)` : ''} from ${esc(filterScopeText())}.</p>
+      <p><b>This permanently deletes ${n} item${n === 1 ? '' : 's'}</b>${units !== n ? ` (quantity ${units})` : ''} from ${esc(filterScopeText())}.</p>
       <p>Their spending and used/binned history are deleted too, so they also disappear from Stats. This can't be undone.</p>
     </div>
     <p class="muted">Tip: export a backup in Settings first if you might want them back.</p>
@@ -1183,7 +1183,7 @@ function bindShopping() {
 // Every figure is tied to when the groceries were BOUGHT (bought-on date, else the day they were added),
 // so "Oct 2026" means groceries bought in October: their spend, how much was used or binned, and what is left now.
 type Period = 'week' | 'month' | 'all' | string; // string = 'YYYY-MM'
-const ST = { col: 'all', cat: 'all', period: 'all' as Period };
+const ST = { col: 'all', cat: 'all', period: 'all' as Period, from: '', to: '' }; // from/to: yyyy-mm-dd for Custom
 function startOfWeek(d = new Date()) {
   const x = new Date(d.getFullYear(), d.getMonth(), d.getDate());
   const day = x.getDay();
@@ -1197,6 +1197,13 @@ function inPeriod(t: number, period: Period) {
   if (period === 'all') return true;
   if (period === 'week') return t >= startOfWeek();
   if (period === 'month') return t >= startOfMonth();
+  if (period === 'lastmonth') { const n = new Date(); return t >= startOfMonth(new Date(n.getFullYear(), n.getMonth() - 1, 1)) && t < startOfMonth(); }
+  if (period === '3m') { const n = new Date(); return t >= new Date(n.getFullYear(), n.getMonth() - 3, n.getDate()).getTime(); }
+  if (period === 'custom') { // inclusive of both days; a blank end is open-ended
+    const from = ST.from ? localDate(ST.from).getTime() : -Infinity;
+    const to = ST.to ? localDate(ST.to).getTime() + 864e5 : Infinity;
+    return t >= from && t < to;
+  }
   return monthKey(t) === period;
 }
 type Rec = { itemId?: string; categoryId: string; collectionId?: string; at: number; boughtAt?: number };
@@ -1246,7 +1253,7 @@ function dataMonths() {
 }
 function statsView() {
   const months = dataMonths();
-  if (!['week', 'month', 'all', ...months].includes(ST.period)) ST.period = 'all';
+  if (!['week', 'month', 'lastmonth', '3m', 'custom', 'all', ...months].includes(ST.period)) ST.period = 'all';
   if (ST.col !== 'all' && !S.cols.some(c => c.id === ST.col)) ST.col = 'all';
   if (ST.cat !== 'all' && !displayCats().some(c => c.id === ST.cat)) ST.cat = 'all';
   const f = statFigures(ST);
@@ -1260,8 +1267,11 @@ function statsView() {
     <div class="stat-filters">
       <select id="st-col" class="sort" aria-label="Collection">${opt('all', 'All collections', ST.col)}${sortedCols().map(c => opt(c.id, c.name, ST.col)).join('')}</select>
       <select id="st-cat" class="sort" aria-label="Category">${opt('all', 'All categories', ST.cat)}${displayCats().map(c => opt(c.id, `${c.icon} ${c.name}`, ST.cat)).join('')}</select>
-      <select id="st-period" class="sort" aria-label="Period">${opt('week', 'This week', ST.period)}${opt('month', 'This month', ST.period)}${months.map(m => opt(m, monthLabel(m), ST.period)).join('')}${opt('all', 'All time', ST.period)}</select>
+      <select id="st-period" class="sort" aria-label="Period">${opt('week', 'This week', ST.period)}${opt('month', 'This month', ST.period)}${opt('lastmonth', 'Last month', ST.period)}${opt('3m', 'Last 3 months', ST.period)}${months.map(m => opt(m, monthLabel(m), ST.period)).join('')}${opt('all', 'All time', ST.period)}${opt('custom', 'Custom…', ST.period)}</select>
     </div>
+    ${ST.period === 'custom' ? `<div class="two stat-custom">
+      <label class="field"><span>From</span><input id="st-from" type="date" value="${ST.from}"></label>
+      <label class="field"><span>To</span><input id="st-to" type="date" value="${ST.to}"></label></div>` : ''}
     <p class="muted stat-note">Groceries bought in this period (by bought-on date, or the day added).</p>
     <section class="panel"><h3>Spent</h3><p class="big-money" id="st-spent">${money(f.spent)}</p>
       ${ST.cat === 'all' ? (f.byCat.length ? `<h4 class="sub-h">By category</h4>
@@ -1283,6 +1293,7 @@ function statsView() {
 function bindStats() {
   const on = (id: string, k: keyof typeof ST) => $<HTMLSelectElement>(id)?.addEventListener('change', e => { ST[k] = (e.target as HTMLSelectElement).value; render(); });
   on('#st-col', 'col'); on('#st-cat', 'cat'); on('#st-period', 'period');
+  for (const k of ['from', 'to'] as const) $<HTMLInputElement>(`#st-${k}`)?.addEventListener('change', e => { ST[k] = (e.target as HTMLInputElement).value; render(); });
   document.querySelectorAll<HTMLElement>('[data-jump]').forEach(b => b.onclick = () => {
     showStatus(b.dataset.jump as StatusFilter);
     S.col = ST.col; S.cat = ST.cat; render();
