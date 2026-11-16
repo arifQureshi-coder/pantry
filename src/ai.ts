@@ -126,7 +126,20 @@ function parseReceiptItems(j: any, cats: Category[]): ReceiptLine[] {
   }));
 }
 
-async function extractReceiptOnce(s: Settings, images: string[], cats: Category[]): Promise<ReceiptLine[]> {
+export interface ReceiptRead { lines: ReceiptLine[]; date: string | null; }
+
+/** Accept only a real yyyy-mm-dd date that is not in the future (receipts are from the past). */
+export function receiptDate(v: unknown, today = new Date()): string | null {
+  if (typeof v !== 'string' || !/^\d{4}-\d{2}-\d{2}$/.test(v)) return null;
+  const [y, m, d] = v.split('-').map(Number);
+  const dt = new Date(y, m - 1, d);
+  if (dt.getFullYear() !== y || dt.getMonth() !== m - 1 || dt.getDate() !== d) return null;
+  const end = new Date(today.getFullYear(), today.getMonth(), today.getDate() + 1);
+  if (dt >= end || y < 2000) return null;
+  return v;
+}
+
+async function extractReceiptOnce(s: Settings, images: string[], cats: Category[]): Promise<ReceiptRead> {
   const multi = images.length > 1;
   const prompt = `You are reading an Australian supermarket receipt (e.g. Woolworths, Coles, Aldi, IGA).
 Extract only purchased grocery/household products. Ignore totals, subtotals, GST, discounts, savings, loyalty points, payment, change and store info.
@@ -135,22 +148,24 @@ If a line has a quantity multiplier (e.g. "2 @ $3.50" or "QTY 2") use it as quan
 For each line include "price" as the amount charged for that line in Australian dollars (the line total, not a unit price, unless only a unit price is printed). If no price is visible, use null.
 Pick the best category id for each item from: ${catList(cats)}.
 ${multi ? `These ${images.length} photos are consecutive overlapping sections of a SINGLE receipt, photographed from top to bottom and given in order (the first image is the top). Merge them into one item list. If a product line is repeated in the overlapping area between two parts, include it only once — do not duplicate it.
-` : ''}Return JSON only: {"items":[{"name":string,"quantity":number,"categoryId":string,"price":number|null}]}`;
+` : ''}Also read the purchase date printed on the receipt as "date" in YYYY-MM-DD. Dates are Australian: numeric dates are DAY/MONTH order (12/03/26 = 12 March 2026). If no purchase date is visible, use null.
+Return JSON only: {"date":string|null,"items":[{"name":string,"quantity":number,"categoryId":string,"price":number|null}]}`;
   const j = await askAI(s, prompt, images);
-  return parseReceiptItems(j, cats);
+  return { lines: parseReceiptItems(j, cats), date: receiptDate(j?.date) };
 }
 
-export async function extractReceipt(s: Settings, image: string | string[], cats: Category[]): Promise<ReceiptLine[]> {
+export async function extractReceipt(s: Settings, image: string | string[], cats: Category[]): Promise<ReceiptRead> {
   const images = imageList(image);
-  if (!images.length) return [];
+  if (!images.length) return { lines: [], date: null };
   if (images.length === 1) return extractReceiptOnce(s, images, cats);
   try {
-    return dedupeAdjacentReceiptLines(await extractReceiptOnce(s, images, cats));
+    const r = await extractReceiptOnce(s, images, cats);
+    return { lines: dedupeAdjacentReceiptLines(r.lines), date: r.date };
   } catch (e) {
     // Combined request was too large or failed: read each part, then merge at the boundaries.
-    const parts: ReceiptLine[][] = [];
+    const parts: ReceiptRead[] = [];
     for (const img of images) parts.push(await extractReceiptOnce(s, [img], cats));
-    return mergeReceiptParts(parts);
+    return { lines: mergeReceiptParts(parts.map(p => p.lines)), date: parts.find(p => p.date)?.date ?? null };
   }
 }
 

@@ -18,12 +18,16 @@ export interface Item {
   noExpiry?: boolean;    // explicitly does not expire (not the same as a missing date)
   opened?: string;       // yyyy-mm-dd
   price?: number;        // unit price in AUD
+  boughtOn?: string;     // yyyy-mm-dd, optional purchase date
+  collectionId?: string; // grocery run / "spree"; missing = Regular
   addedAt: number;
   status: Status;
   finishedAt?: number;
 }
 
 export interface Category { id: string; name: string; icon: string; preset?: boolean; }
+/** A grocery run ("spree"), e.g. Regular, Stocking up, Guests – Dec. Every item belongs to one. */
+export interface Collection { id: string; name: string; builtin?: boolean; createdAt: number; }
 export interface ShopItem { id: string; name: string; done: boolean; addedAt: number; fromItemId?: string; }
 
 export type Provider = 'gemini' | 'openai';
@@ -35,9 +39,10 @@ export interface Settings {
   openaiModel: string;
   leadDays: number;
   lastNotified?: string;   // yyyy-mm-dd, avoid repeat notifications on the same day
+  view?: 'grouped' | 'list' | 'grid';
 }
 
-export interface WasteEvent { id: string; name: string; categoryId: string; type: 'used' | 'binned'; at: number; unitPrice?: number; quantity?: number; }
+export interface WasteEvent { id: string; itemId?: string; name: string; categoryId: string; collectionId?: string; type: 'used' | 'binned'; at: number; unitPrice?: number; quantity?: number; }
 
 /** A recorded spend, kept even if the item is later used up or deleted. */
 export interface Purchase {
@@ -46,6 +51,7 @@ export interface Purchase {
   name: string;
   barcode?: string;
   categoryId: string;
+  collectionId?: string;
   unitPrice: number;
   quantity: number;
   total: number;

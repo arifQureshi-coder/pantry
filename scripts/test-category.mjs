@@ -35,11 +35,15 @@ await page.evaluate(() => new Promise((res, rej) => {
 await page.goto(BASE + '?demo', { waitUntil: 'networkidle' });
 await page.waitForSelector('.item');
 
+if (!await page.locator('.cat-group').count()) fail('default view should be grouped by category');
+else pass('default view is grouped by category');
+
+const groupOf = name => page.locator('.cat-group', { has: page.locator('.item', { hasText: name }) }).locator('.cat-h-name');
 const yog = page.locator('.item', { hasText: 'Greek Yoghurt' });
 await yog.waitFor();
-const before = await yog.locator('.sub').innerText();
-if (!/\bDairy\b/.test(before)) fail(`list should show Dairy before change, got "${before}"`);
-else pass(`list shows Dairy before change (${before})`);
+const before = await groupOf('Greek Yoghurt').innerText();
+if (!/\bDairy\b/.test(before)) fail(`Yoghurt should be in the Dairy group, got "${before}"`);
+else pass(`grouped under Dairy before change (${before})`);
 
 await yog.click();
 await page.waitForSelector('.sheet-wrap.open #e-cats');
@@ -48,16 +52,16 @@ await page.locator('#e-save').click();
 await page.waitForSelector('.sheet-wrap.open', { state: 'detached' });
 await page.waitForTimeout(300);
 
-const afterSave = await page.locator('.item', { hasText: 'Greek Yoghurt' }).locator('.sub').innerText();
-if (!/\bSnacks\b/.test(afterSave)) fail(`list should show Snacks after save, got "${afterSave}"`);
-else pass(`list shows Snacks after save (${afterSave})`);
+const afterSave = await groupOf('Greek Yoghurt').innerText();
+if (!/\bSnacks\b/.test(afterSave)) fail(`Yoghurt should be in the Snacks group after save, got "${afterSave}"`);
+else pass(`grouped under Snacks after save (${afterSave})`);
 
 await page.reload({ waitUntil: 'networkidle' });
 await page.waitForSelector('.item');
 
-const afterReload = await page.locator('.item', { hasText: 'Greek Yoghurt' }).locator('.sub').innerText();
-if (!/\bSnacks\b/.test(afterReload)) fail(`list should show Snacks after reload, got "${afterReload}"`);
-else pass(`list shows Snacks after reload (${afterReload})`);
+const afterReload = await groupOf('Greek Yoghurt').innerText();
+if (!/\bSnacks\b/.test(afterReload)) fail(`Yoghurt should be in the Snacks group after reload, got "${afterReload}"`);
+else pass(`grouped under Snacks after reload (${afterReload})`);
 
 await page.locator('[data-view=grid]').click();
 await page.waitForSelector('.tile');
@@ -71,6 +75,11 @@ if (!/1 item/.test(dairyText)) fail(`Dairy grid count should be 1, got "${dairyT
 else pass(`grid Dairy count is 1`);
 
 await page.locator('[data-view=list]').click();
+await page.waitForSelector('.item');
+const flatSub = await page.locator('.item', { hasText: 'Greek Yoghurt' }).locator('.sub').innerText();
+if (!/\bSnacks\b/.test(flatSub)) fail(`flat list should show Snacks, got "${flatSub}"`);
+else pass(`flat list shows Snacks (${flatSub})`);
+
 await page.locator('#filter-btn').click();
 await page.waitForSelector('.sheet-wrap.open');
 await page.locator('[data-cat="snacks"]').click();

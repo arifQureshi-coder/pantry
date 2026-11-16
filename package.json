@@ -7,7 +7,8 @@
     "dev": "vite --host",
     "build": "tsc --noEmit && vite build",
     "preview": "vite preview --host",
-    "test:dates": "node --experimental-strip-types scripts/test-dates.ts"
+    "test:dates": "node --experimental-strip-types scripts/test-dates.ts",
+    "test:receipt": "node --experimental-strip-types scripts/test-receipt-date.ts"
   },
   "devDependencies": {
     "typescript": "^7.0.2",

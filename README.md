@@ -9,6 +9,8 @@ There is no backend and no account. All data is kept in IndexedDB on the phone.
 - `npm run build`: type-check, then build static files into `dist/`
 - `npm run preview`: serve `dist/` locally
 - `npm run test:dates`: run the expiry date parser tests
+- `npm run test:receipt`: run the receipt purchase-date check
+- Browser checks (need `vite preview` running): `BASE=http://127.0.0.1:4173/ node scripts/test-category.mjs` and `node scripts/test-collections.mjs`
 - Open with `?demo` on an empty install to load sample items.
 
 ## AI

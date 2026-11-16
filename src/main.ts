@@ -1,5 +1,5 @@
 import './style.css';
-import type { Item, Category, ShopItem, Settings, Location, WasteEvent, Purchase } from './types';
+import type { Item, Category, Collection, ShopItem, Settings, Location, WasteEvent, Purchase } from './types';
 import * as db from './db';
 import { guessCategory, defaultLocation, ICON_CHOICES } from './categories';
 import { daysUntil, formatDate, parseExpiry } from './dates';
@@ -11,18 +11,37 @@ const scanner = () => import('./scanner');
 // ---------- state ----------
 type Tab = 'items' | 'shopping' | 'stats' | 'settings';
 type StatusFilter = 'all' | 'soon' | 'expired' | 'fresh' | 'none' | 'attention' | 'noexpiry';
+type ItemsView = 'grouped' | 'list' | 'grid';
+const collapsedCats = new Set<string>();
+function listLikeView(): 'grouped' | 'list' { return S.settings.view === 'list' ? 'list' : 'grouped'; }
+function isItemsView(v: unknown): v is ItemsView { return v === 'grouped' || v === 'list' || v === 'grid'; }
+async function applyView(v: ItemsView) {
+  S.view = v; S.cat = 'all';
+  S.settings.view = v; await db.saveSettings(S.settings);
+  render();
+}
+
 const S = {
   tab: 'items' as Tab,
-  items: [] as Item[], cats: [] as Category[], shop: [] as ShopItem[], events: [] as WasteEvent[], purchases: [] as Purchase[],
+  items: [] as Item[], cats: [] as Category[], cols: [] as Collection[], col: 'all' as string, shop: [] as ShopItem[], events: [] as WasteEvent[], purchases: [] as Purchase[],
   settings: db.DEFAULT_SETTINGS as Settings,
-  q: '', cat: 'all', loc: 'all' as 'all' | Location, sort: 'expiry' as 'expiry' | 'name' | 'added', view: 'list' as 'list' | 'grid',
+  q: '', cat: 'all', loc: 'all' as 'all' | Location, sort: 'expiry' as 'expiry' | 'name' | 'added', view: 'grouped' as ItemsView,
   status: 'all' as StatusFilter,
 };
 const $ = <T extends HTMLElement = HTMLElement>(sel: string, root: ParentNode = document) => root.querySelector(sel) as T;
 const esc = (s: unknown) => String(s ?? '').replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]!));
 const todayISO = () => { const d = new Date(); return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`; };
 const localDate = (iso: string) => { const [y, m, d] = iso.split('-').map(Number); return new Date(y, m - 1, d); };
-const catOf = (id: string) => S.cats.find(c => c.id === id) ?? { id: 'other', name: 'Other', icon: '📦' };
+/** Shown when an item's category was deleted (or "Other" itself was deleted). */
+const FALLBACK_CAT: Category = { id: 'other', name: 'Uncategorised', icon: '📦' };
+const catOf = (id: string) => S.cats.find(c => c.id === id) ?? S.cats.find(c => c.id === 'other') ?? FALLBACK_CAT;
+/** The category an item is shown under: its own, or the Other/Uncategorised fallback. */
+const catKey = (id: string) => S.cats.some(c => c.id === id) ? id : 'other';
+/** Categories to group by: the user's list, plus the fallback if items need it and Other was deleted. */
+const displayCats = () => S.cats.some(c => c.id === 'other') ? S.cats : [...S.cats, FALLBACK_CAT];
+const colId = (i: { collectionId?: string }) => S.cols.some(c => c.id === i.collectionId) ? i.collectionId! : db.REGULAR_ID;
+const colOf = (id?: string) => S.cols.find(c => c.id === id) ?? S.cols.find(c => c.id === db.REGULAR_ID) ?? db.REGULAR;
+const sortedCols = () => [...S.cols].sort((a, b) => (a.id === db.REGULAR_ID ? -1 : b.id === db.REGULAR_ID ? 1 : a.createdAt - b.createdAt));
 const active = () => S.items.filter(i => i.status === 'active');
 const money = (n: number) => new Intl.NumberFormat('en-AU', { style: 'currency', currency: 'AUD' }).format(n);
 const parseQty = (v: string) => Math.max(1, Math.round(+v || 1));
@@ -42,13 +61,17 @@ function lastPaid(opts: { barcode?: string; name?: string }): number | undefined
 }
 async function recordPurchase(i: Item, quantity: number, unitPrice: number, at = Date.now(), total?: number) {
   if (!(unitPrice > 0) || quantity <= 0) return;
-  const p: Purchase = { id: db.uid(), itemId: i.id, name: i.name, barcode: i.barcode, categoryId: i.categoryId, unitPrice, quantity, total: total ?? Math.round(unitPrice * quantity * 100) / 100, at };
+  const p: Purchase = { id: db.uid(), itemId: i.id, name: i.name, barcode: i.barcode, categoryId: i.categoryId, collectionId: colId(i), unitPrice, quantity, total: total ?? Math.round(unitPrice * quantity * 100) / 100, at };
   await db.put('purchases', p); S.purchases.push(p);
 }
 
 async function load() {
   S.cats = await db.ensureCategories();
+  S.cols = await db.ensureCollections();
+  if (S.col !== 'all' && !S.cols.some(c => c.id === S.col)) S.col = 'all';
   [S.items, S.shop, S.events, S.settings, S.purchases] = await Promise.all([db.getAll<Item>('items'), db.getAll<ShopItem>('shopping'), db.getAll<WasteEvent>('events'), db.getSettings(), db.getAll<Purchase>('purchases')]);
+  S.view = isItemsView(S.settings.view) ? S.settings.view : 'grouped';
+  for (const i of S.items) if (!i.collectionId) i.collectionId = db.REGULAR_ID;
 }
 
 // ---------- expiry helpers ----------
@@ -208,14 +231,16 @@ function itemsView() {
   return `
     <header class="hdr"><h1>Pantry</h1>
       <div class="seg small" role="tablist">
-        <button data-view="list" class="${S.view === 'list' ? 'on' : ''}" aria-label="List view">☰</button>
-        <button data-view="grid" class="${S.view === 'grid' ? 'on' : ''}" aria-label="Category view">▦</button>
+        <button data-view="grouped" class="${S.view === 'grouped' ? 'on' : ''}" aria-label="Grouped by category">Groups</button>
+        <button data-view="list" class="${S.view === 'list' ? 'on' : ''}" aria-label="Flat list">List</button>
+        <button data-view="grid" class="${S.view === 'grid' ? 'on' : ''}" aria-label="Category grid">Grid</button>
       </div>
     </header>
     ${(() => { const check = datesToCheck(); return check.length ? `<button class="banner check" id="dates-check">
         <span>📅</span><span><b>${check.length} date${check.length > 1 ? 's' : ''} to check</b><br><small>${esc(check.slice(0, 3).map(i => i.name).join(', '))}${check.length > 3 ? '…' : ''}</small></span><span>›</span></button>` : ''; })()}
     ${soon.length ? `<button class="banner ${soon.some(i => freshness(i) === 'expired') ? 'red' : ''}" id="soon">
         <span>⏰</span><span><b>${soon.length} item${soon.length > 1 ? 's' : ''} expiring soon</b><br><small>${esc(soon.slice(0, 3).map(i => i.name).join(', '))}${soon.length > 3 ? '…' : ''}</small></span><span>›</span></button>` : ''}
+    ${collectionChips()}
     <div class="search"><span>🔎</span><input id="q" type="search" placeholder="Search items" value="${esc(S.q)}" autocomplete="off"></div>
     <div class="row-between">
       <button class="btn-filter ${n ? 'on' : ''}" id="filter-btn" aria-label="${n ? `Filter, ${n} active` : 'Filter'}">Filter${n ? `<b class="fbadge">${n}</b>` : ''}</button>
@@ -228,13 +253,43 @@ function itemsView() {
     ${activeFilterChips()}
     <div id="results">${resultsHtml()}</div>`;
 }
+function collectionChips() {
+  const n = (id: string) => active().filter(i => id === 'all' || colId(i) === id).length;
+  const chip = (id: string, label: string) => `<button type="button" class="chip ${S.col === id ? 'on' : ''}" data-col="${esc(id)}">${esc(label)} <span class="n">${n(id)}</span></button>`;
+  return `<div class="chips col-chips" role="tablist" aria-label="Collection">${chip('all', 'All')}${sortedCols().map(c => chip(c.id, c.name)).join('')}</div>`;
+}
 function resultsHtml() {
   const list = filtered();
   if (S.view === 'grid' && S.cat === 'all' && !S.q) return gridView();
-  return list.length ? `<ul class="list">${list.map(itemRow).join('')}</ul>` : emptyState();
+  if (!list.length) return emptyState();
+  if (S.view === 'list') return `<ul class="list">${list.map(i => itemRow(i)).join('')}</ul>`;
+  return groupedView(list);
+}
+function groupedView(list: Item[]) {
+  const byId = new Map<string, Item[]>();
+  for (const i of list) {
+    const id = catKey(i.categoryId);
+    const arr = byId.get(id) ?? []; arr.push(i); byId.set(id, arr);
+  }
+  const groups = displayCats().map(c => ({ c, items: byId.get(c.id) ?? [] })).filter(g => g.items.length);
+  return groups.map(({ c, items }) => {
+    const closed = collapsedCats.has(c.id);
+    const levels = items.map(freshness);
+    const alert = levels.includes('expired') ? 'expired' : levels.includes('soon') ? 'soon' : '';
+    return `<section class="cat-group${closed ? ' closed' : ''}">
+      <button type="button" class="cat-h" data-toggle="${c.id}" aria-expanded="${!closed}">
+        <span class="cat-h-icon">${c.icon}</span>
+        <span class="cat-h-name">${esc(c.name)}</span>
+        ${alert ? `<i class="dot ${alert}" aria-hidden="true"></i>` : ''}
+        <span class="cat-h-n">${items.length}</span>
+        <span class="cat-h-chevron" aria-hidden="true">▾</span>
+      </button>
+      ${closed ? '' : `<ul class="list">${items.map(i => itemRow(i, true)).join('')}</ul>`}
+    </section>`;
+  }).join('');
 }
 function gridView() {
-  const counts = S.cats.map(c => {
+  const counts = displayCats().map(c => {
     const its = itemsMatching({ cat: c.id });
     return { c, n: its.length, alert: its.some(i => ['soon', 'expired'].includes(freshness(i))) };
   }).filter(x => x.n);
@@ -255,16 +310,17 @@ function emptyState() {
     attention: { icon: '✅', title: 'Nothing needs attention', body: 'No items are expired or expiring soon.' },
   };
   const m = copy[S.status];
-  const narrowed = S.q || S.cat !== 'all' || S.loc !== 'all';
+  const narrowed = S.q || S.cat !== 'all' || S.loc !== 'all' || S.col !== 'all';
   return `<div class="empty"><div class="empty-icon">${m.icon}</div><h3>${m.title}</h3><p>${narrowed && S.status !== 'all' ? 'Try clearing search, category or location.' : m.body}</p></div>`;
 }
-function itemRow(i: Item) {
+function itemRow(i: Item, hideCat = false) {
   const c = catOf(i.categoryId); const f = freshness(i);
   const pill = i.noExpiry ? 'noexpiry' : i.expiryStatus === 'reading' ? 'reading' : i.expiryStatus === 'failed' ? 'failed' : f + (i.expiryStatus === 'pending' ? ' pending' : '');
   const body = i.expiryStatus === 'reading' && !i.noExpiry
     ? `<i class="spin-sm" aria-hidden="true"></i> Reading…`
     : esc(expiryLabel(i));
-  const bits = [c.name, i.location, i.quantity > 1 ? `×${i.quantity}` : '', i.opened ? 'opened' : ''].filter(Boolean);
+  const col = S.col === 'all' && colId(i) !== db.REGULAR_ID ? colOf(colId(i)).name : '';
+  const bits = [hideCat ? '' : c.name, i.location, col, i.quantity > 1 ? `×${i.quantity}` : '', i.opened ? 'opened' : ''].filter(Boolean);
   return `<li class="item" data-id="${i.id}">
     <div class="thumb">${i.image ? `<img src="${esc(i.image)}" alt="" loading="lazy" onerror="this.replaceWith(document.createTextNode('${c.icon}'))">` : c.icon}</div>
     <div class="meta"><div class="name">${esc(i.name)}</div><div class="sub">${esc(bits.join(' · '))}</div></div>
@@ -281,15 +337,15 @@ const STATUS_CHIPS: [StatusFilter, string, string][] = [
 const STATUS_LABEL: Record<StatusFilter, string> = {
   all: 'All', soon: 'Expiring soon', expired: 'Expired', fresh: 'Fresh', none: 'No date', noexpiry: 'No expiry', attention: 'Needs attention',
 };
-type FilterSet = { status: StatusFilter; cat: string; loc: 'all' | Location; q: string };
-const currentFilters = (): FilterSet => ({ status: S.status, cat: S.cat, loc: S.loc, q: S.q });
+type FilterSet = { status: StatusFilter; cat: string; loc: 'all' | Location; q: string; col: string };
+const currentFilters = (): FilterSet => ({ status: S.status, cat: S.cat, loc: S.loc, q: S.q, col: S.col });
 function activeFilterCount(f: FilterSet = currentFilters()) {
   return (f.status !== 'all' ? 1 : 0) + (f.cat !== 'all' ? 1 : 0) + (f.loc !== 'all' ? 1 : 0);
 }
 function itemsMatching(over: Partial<FilterSet> = {}) {
   const f = { ...currentFilters(), ...over };
   const q = f.q.trim().toLowerCase();
-  return active().filter(i => (f.cat === 'all' || i.categoryId === f.cat) && (f.loc === 'all' || i.location === f.loc) &&
+  return active().filter(i => (f.col === 'all' || colId(i) === f.col) && (f.cat === 'all' || catKey(i.categoryId) === f.cat) && (f.loc === 'all' || i.location === f.loc) &&
     (!q || `${i.name} ${i.brand ?? ''} ${catOf(i.categoryId).name}`.toLowerCase().includes(q)) &&
     matchesStatus(i, f.status));
 }
@@ -326,8 +382,9 @@ function filtered() {
 function bindItems() {
   const q = $<HTMLInputElement>('#q');
   // Only re-render the results while typing so the iOS keyboard stays open.
-  q?.addEventListener('input', () => { S.q = q.value; $('#results').innerHTML = resultsHtml(); bindResults(); });
-  document.querySelectorAll<HTMLElement>('[data-view]').forEach(b => b.onclick = () => { S.view = b.dataset.view as any; S.cat = 'all'; render(); });
+  q?.addEventListener('input', () => { S.q = q.value; collapsedCats.clear(); $('#results').innerHTML = resultsHtml(); bindResults(); });
+  document.querySelectorAll<HTMLElement>('[data-view]').forEach(b => b.onclick = () => applyView(b.dataset.view as ItemsView));
+  document.querySelectorAll<HTMLElement>('[data-col]').forEach(b => b.onclick = () => { S.col = b.dataset.col!; collapsedCats.clear(); render(); });
   $('#soon')?.addEventListener('click', () => showStatus('attention'));
   $('#dates-check')?.addEventListener('click', openDatesSheet);
   $('#filter-btn')?.addEventListener('click', openFilterSheet);
@@ -342,7 +399,7 @@ function bindItems() {
   bindResults();
 }
 function showStatus(status: StatusFilter) {
-  S.tab = 'items'; S.view = 'list'; S.cat = 'all'; S.loc = 'all'; S.q = ''; S.sort = 'expiry'; S.status = status;
+  S.tab = 'items'; if (S.view === 'grid') S.view = listLikeView(); S.cat = 'all'; S.loc = 'all'; S.col = 'all'; S.q = ''; S.sort = 'expiry'; S.status = status;
   render(); window.scrollTo(0, 0);
 }
 function openFilterSheet() {
@@ -356,7 +413,7 @@ function openFilterSheet() {
     $('#f-clear', s.el).onclick = () => { draft.status = 'all'; draft.cat = 'all'; draft.loc = 'all'; paint(); };
     $('#f-apply', s.el).onclick = () => {
       S.status = draft.status; S.cat = draft.cat; S.loc = draft.loc;
-      if (S.cat !== 'all' || S.status !== 'all' || S.loc !== 'all') S.view = 'list';
+      if (S.view === 'grid' && (S.cat !== 'all' || S.status !== 'all' || S.loc !== 'all')) S.view = listLikeView();
       s.close(); render();
     };
   };
@@ -365,7 +422,7 @@ function openFilterSheet() {
 function filterSheetHtml(f: FilterSet) {
   const sc = statusCounts(f);
   const n = itemsMatching(f).length;
-  const usedCats = S.cats.filter(c => active().some(i => i.categoryId === c.id));
+  const usedCats = displayCats().filter(c => active().some(i => catKey(i.categoryId) === c.id));
   const catCount = (id: string) => itemsMatching({ ...f, cat: id }).length;
   const locCount = (loc: FilterSet['loc']) => itemsMatching({ ...f, loc }).length;
   const chip = (on: boolean, extra: string, attrs: string, label: string, count: number) =>
@@ -386,7 +443,12 @@ function filterSheetHtml(f: FilterSet) {
     </div>`;
 }
 function bindResults() {
-  document.querySelectorAll<HTMLElement>('[data-cat]').forEach(b => b.onclick = () => { S.cat = b.dataset.cat!; S.view = 'list'; render(); });
+  document.querySelectorAll<HTMLElement>('[data-cat]').forEach(b => b.onclick = () => { S.cat = b.dataset.cat!; if (S.view === 'grid') S.view = listLikeView(); render(); });
+  document.querySelectorAll<HTMLElement>('[data-toggle]').forEach(b => b.onclick = () => {
+    const id = b.dataset.toggle!;
+    if (collapsedCats.has(id)) collapsedCats.delete(id); else collapsedCats.add(id);
+    $('#results').innerHTML = resultsHtml(); bindResults();
+  });
   document.querySelectorAll<HTMLElement>('.item').forEach(li => li.onclick = () => editItem(S.items.find(i => i.id === li.dataset.id)!));
 }
 
@@ -411,7 +473,7 @@ async function barcodeFlow() {
   done();
   // Same barcode already in stock? Offer a quick +1 instead of a duplicate.
   const existing = active().find(i => i.barcode === code);
-  if (existing && confirm(`You already have ${existing.name} (×${existing.quantity}). Add 1 to its quantity?\n\nCancel adds it as a separate item (e.g. a different expiry).`)) {
+  if (existing && confirm(`You already have ${existing.name} (×${existing.quantity}) in ${colOf(colId(existing)).name}. Add 1 to its quantity?\n\nCancel adds it as a separate item (e.g. a different expiry).`)) {
     const nxt = { ...existing, quantity: existing.quantity + 1 };
     await saveItem(nxt);
     if (nxt.price) await recordPurchase(nxt, 1, nxt.price);
@@ -419,7 +481,7 @@ async function barcodeFlow() {
   }
   if (!p) toast('Product not found. Enter the details.');
   const name = p ? [p.name, p.quantity].filter(Boolean).join(' ') : '';
-  const catId = name ? guessCategory(`${name} ${p?.categoriesText ?? ''}`) : 'other';
+  const catId = name ? catKey(guessCategory(`${name} ${p?.categoriesText ?? ''}`)) : 'other';
   const paid = lastPaid({ barcode: code, name });
   editItem(null, { name, brand: p?.brand, image: p?.image, barcode: code, categoryId: catId, location: defaultLocation(catId), price: paid }, true, 'barcode');
 }
@@ -480,22 +542,31 @@ async function receiptFlow() {
   const parts = await collectReceiptParts([first]);
   if (!parts?.length) return;
   const done = busy(parts.length > 1 ? `Reading ${parts.length} receipt parts…` : 'Reading receipt…');
-  let lines;
-  try { lines = await extractReceipt(S.settings, await Promise.all(parts.map(b => fileToJpeg(b, 1600, 0.85))), S.cats); }
+  let read;
+  try { read = await extractReceipt(S.settings, await Promise.all(parts.map(b => fileToJpeg(b, 1600, 0.85))), S.cats); }
   catch (e: any) { done(); return alert(e.message); }
   done();
+  const lines = read.lines;
   if (!lines.length) return toast('No items found on that receipt');
-  const catOpts = (sel: string) => S.cats.map(c => `<option value="${c.id}" ${c.id === sel ? 'selected' : ''}>${c.icon} ${esc(c.name)}</option>`).join('');
-  const s = sheet(`<p class="muted">Untick anything you don't want. Tap a name to edit it.</p>
+  const catOpts = (sel: string) => S.cats.map(c => `<option value="${c.id}" ${c.id === sel ? 'selected' : ''}>${c.icon} ${esc(c.name)}</option>`).join('')
+    + (S.cats.some(c => c.id === 'other') ? '' : `<option value="other" ${sel === 'other' ? 'selected' : ''}>${FALLBACK_CAT.icon} ${FALLBACK_CAT.name}</option>`);
+  const s = sheet(`<div class="two">
+      <div class="field"><span>Add to collection</span><select id="rv-col">${collectionOptions(db.REGULAR_ID)}</select></div>
+      <label class="field"><span>Bought on</span><input id="rv-date" type="date" value="${read.date ?? ''}" max="${todayISO()}"><small class="muted">${read.date ? 'Read from the receipt' : 'Optional'}</small></label>
+    </div>
+    <p class="muted">Untick anything you don't want. Tap a name to edit it.</p>
     <ul class="review">${lines.map((l, n) => `<li data-n="${n}">
       <input type="checkbox" checked aria-label="Include">
       <div class="rv-main"><input class="rv-name" value="${esc(l.name)}"><div class="rv-sub">
-        <select class="rv-cat">${catOpts(l.categoryId)}</select>
+        <select class="rv-cat">${catOpts(catKey(l.categoryId))}</select>
         <input class="rv-qty" type="number" min="1" inputmode="numeric" value="${l.quantity}" aria-label="Quantity">
         <input class="rv-price" type="number" min="0" step="0.01" inputmode="decimal" value="${l.price ?? ''}" placeholder="$" aria-label="Line price"></div></div></li>`).join('')}</ul>
     <div class="sheet-foot"><button class="btn ghost" data-close>Cancel</button><button class="btn primary" id="rv-add">Add items</button></div>`, { full: true, title: 'Review receipt' });
+  bindCollectionSelect($<HTMLSelectElement>('#rv-col', s.el));
   $('#rv-add', s.el).onclick = async () => {
     let n = 0;
+    const collectionId = pickedCollection($<HTMLSelectElement>('#rv-col', s.el).value);
+    const boughtOn = $<HTMLInputElement>('#rv-date', s.el).value || undefined;
     for (const li of s.el.querySelectorAll<HTMLElement>('.review li')) {
       if (!$<HTMLInputElement>('input[type=checkbox]', li).checked) continue;
       const name = $<HTMLInputElement>('.rv-name', li).value.trim(); if (!name) continue;
@@ -503,19 +574,72 @@ async function receiptFlow() {
       const quantity = parseQty($<HTMLInputElement>('.rv-qty', li).value);
       const linePrice = parseMoney($<HTMLInputElement>('.rv-price', li).value);
       const price = linePrice != null ? Math.round(linePrice / quantity * 100) / 100 : undefined;
-      const it = { ...blank(), name, categoryId, location: defaultLocation(categoryId), quantity, price };
+      const it: Item = { ...blank(), name, categoryId, location: defaultLocation(categoryId), quantity, price, collectionId, boughtOn };
       await saveItem(it);
-      if (price) await recordPurchase(it, quantity, price, Date.now(), linePrice);
+      if (price) await recordPurchase(it, quantity, price, purchaseTime(boughtOn), linePrice);
       n++;
     }
-    s.close(); S.tab = 'items'; render(); toast(`Added ${n} item${n === 1 ? '' : 's'}. Tap one to add its expiry.`);
+    s.close(); S.tab = 'items'; render(); toast(`Added ${n} item${n === 1 ? '' : 's'} to ${colOf(collectionId).name}. Tap one to add its expiry.`);
   };
 }
 
-const blank = (): Item => ({ id: db.uid(), name: '', categoryId: 'other', location: 'Pantry', quantity: 1, addedAt: Date.now(), status: 'active' });
+/** Purchases are dated on the bought-on day (midday, local) when one is given. */
+function purchaseTime(boughtOn?: string) {
+  if (!boughtOn || boughtOn === todayISO()) return Date.now();
+  const d = localDate(boughtOn); d.setHours(12);
+  return d.getTime();
+}
+
+// ---------- collections ----------
+const NEW_COL = '__new__';
+const pickedCollection = (v: string) => S.cols.some(c => c.id === v) ? v : db.REGULAR_ID;
+function collectionOptions(sel: string) {
+  return sortedCols().map(c => `<option value="${esc(c.id)}" ${c.id === sel ? 'selected' : ''}>${esc(c.name)}</option>`).join('')
+    + `<option value="${NEW_COL}">＋ New collection…</option>`;
+}
+/** A collection <select>; choosing "+ New collection…" asks for a name, then selects it. */
+function bindCollectionSelect(sel: HTMLSelectElement, onChange?: (id: string) => void) {
+  let prev = sel.value;
+  sel.addEventListener('change', () => {
+    if (sel.value !== NEW_COL) { prev = sel.value; onChange?.(prev); return; }
+    sel.value = prev;
+    openCollectionEditor(null, c => {
+      sel.innerHTML = collectionOptions(c.id); sel.value = c.id; prev = c.id; onChange?.(c.id);
+    });
+  });
+}
+function openCollectionEditor(existing: Collection | null, onSaved?: (c: Collection) => void) {
+  const s = sheet(`<label class="field"><span>Name</span><input id="col-name" value="${esc(existing?.name ?? '')}" placeholder="e.g. Guests – Dec" autocomplete="off"></label>
+    <p class="muted">A collection is one grocery run, like a stock-up or a shop for guests.</p>
+    <div class="sheet-foot"><button class="btn ghost" data-close>Cancel</button><button class="btn primary" id="col-save">${existing ? 'Save' : 'Add'}</button></div>`, { title: existing ? 'Rename collection' : 'New collection' });
+  $('#col-save', s.el).onclick = async () => {
+    const name = $<HTMLInputElement>('#col-name', s.el).value.trim(); if (!name) return toast('Give it a name');
+    if (S.cols.some(c => c.id !== existing?.id && c.name.toLowerCase() === name.toLowerCase())) return toast('You already have a collection with that name');
+    const c: Collection = existing ? { ...existing, name } : { id: 'col-' + db.uid().slice(0, 8), name, createdAt: Date.now() };
+    await db.put('collections', c);
+    const k = S.cols.findIndex(x => x.id === c.id); if (k >= 0) S.cols[k] = c; else S.cols.push(c);
+    s.close();
+    if (onSaved) onSaved(c); else render();
+  };
+  setTimeout(() => $<HTMLInputElement>('#col-name', s.el).focus(), 300);
+}
+/** Delete a collection: its items and history move to Regular. Regular can't be deleted. */
+async function deleteCollection(id: string) {
+  if (id === db.REGULAR_ID) return;
+  for (const i of S.items.filter(i => i.collectionId === id)) { i.collectionId = db.REGULAR_ID; await db.put('items', i); }
+  for (const p of S.purchases.filter(p => p.collectionId === id)) { p.collectionId = db.REGULAR_ID; await db.put('purchases', p); }
+  for (const e of S.events.filter(e => e.collectionId === id)) { e.collectionId = db.REGULAR_ID; await db.put('events', e); }
+  await db.del('collections', id);
+  S.cols = S.cols.filter(c => c.id !== id);
+  if (S.col === id) S.col = 'all';
+}
+
+const blank = (): Item => ({ id: db.uid(), name: '', categoryId: 'other', collectionId: db.REGULAR_ID, location: 'Pantry', quantity: 1, addedAt: Date.now(), status: 'active' });
 async function saveItem(i: Item) {
   const prev = S.items.find(x => x.id === i.id);
   const prevCat = prev?.categoryId;
+  const prevCol = prev ? colId(prev) : undefined;
+  if (!i.collectionId) i.collectionId = db.REGULAR_ID;
   await db.put('items', i);
   const k = S.items.findIndex(x => x.id === i.id);
   if (k >= 0) S.items[k] = i; else S.items.push(i);
@@ -525,9 +649,90 @@ async function saveItem(i: Item) {
       p.categoryId = i.categoryId; await db.put('purchases', p);
     }
   }
+  // Moved to another collection: its spend and used/binned history move with it.
+  if (prevCol && prevCol !== i.collectionId) {
+    for (const p of S.purchases.filter(x => x.itemId === i.id)) { p.collectionId = i.collectionId; await db.put('purchases', p); }
+    for (const e of S.events.filter(x => x.itemId === i.id)) { e.collectionId = i.collectionId; await db.put('events', e); }
+  }
   // Bought it again: tick it off the shopping list
   const match = S.shop.find(s => !s.done && s.name.toLowerCase() === i.name.toLowerCase());
   if (match && k < 0) { match.done = true; await db.put('shopping', match); }
+}
+
+function frequentCategories(exclude: string[], limit: number): Category[] {
+  const stats = new Map<string, { n: number; recent: number }>();
+  for (const i of active()) {
+    const cur = stats.get(i.categoryId) ?? { n: 0, recent: 0 };
+    cur.n++; cur.recent = Math.max(cur.recent, i.addedAt);
+    stats.set(i.categoryId, cur);
+  }
+  const order = new Map(S.cats.map((c, i) => [c.id, i]));
+  return S.cats
+    .filter(c => !exclude.includes(c.id))
+    .sort((a, b) => {
+      const as = stats.get(a.id) ?? { n: 0, recent: 0 }, bs = stats.get(b.id) ?? { n: 0, recent: 0 };
+      return bs.n - as.n || bs.recent - as.recent || (order.get(a.id) ?? 0) - (order.get(b.id) ?? 0);
+    })
+    .slice(0, limit);
+}
+function catQuickChips(selectedId: string) {
+  const current = catOf(selectedId);
+  const rest = frequentCategories([selectedId], 7);
+  return [current, ...rest].map(c => `<button type="button" class="chip ${c.id === selectedId ? 'on' : ''}" data-c="${c.id}">${c.icon} ${esc(c.name)}</button>`).join('')
+    + `<button type="button" class="chip more" data-cat-more>More…</button>`;
+}
+function openNewCategory(onCreated?: (c: Category) => void) { openCategoryEditor(null, onCreated); }
+function openCategoryEditor(existing: Category | null, onSaved?: (c: Category) => void) {
+  const start = existing?.icon ?? ICON_CHOICES[0];
+  let icon = start;
+  const custom = existing && !ICON_CHOICES.includes(start) ? start : '';
+  const s = sheet(`<label class="field"><span>Name</span><input id="c-name" value="${esc(existing?.name ?? '')}" placeholder="e.g. Baby food"></label>
+    <div class="field"><span>Icon</span><div class="icons">${ICON_CHOICES.map(i => `<button class="${i === start ? 'on' : ''}" data-i="${i}">${i}</button>`).join('')}</div>
+    <input id="c-custom" placeholder="…or type any emoji" maxlength="4" value="${esc(custom)}"></div>
+    <div class="sheet-foot"><button class="btn ghost" data-close>Cancel</button><button class="btn primary" id="c-save">${existing ? 'Save' : 'Add'}</button></div>`, { title: existing ? 'Edit category' : 'New category' });
+  s.el.querySelectorAll<HTMLElement>('[data-i]').forEach(b => b.onclick = () => { icon = b.dataset.i!; $<HTMLInputElement>('#c-custom', s.el).value = ''; s.el.querySelectorAll('[data-i]').forEach(x => x.classList.toggle('on', x === b)); });
+  $('#c-save', s.el).onclick = async () => {
+    const name = $<HTMLInputElement>('#c-name', s.el).value.trim(); if (!name) return toast('Give it a name');
+    const chosen = $<HTMLInputElement>('#c-custom', s.el).value.trim() || icon;
+    const c: Category = existing ? { ...existing, name, icon: chosen } : { id: 'c-' + db.uid().slice(0, 8), name, icon: chosen };
+    await db.put('categories', c);
+    const k = S.cats.findIndex(x => x.id === c.id); if (k >= 0) S.cats[k] = c; else S.cats.push(c);
+    s.close();
+    if (onSaved) onSaved(c); else render();
+  };
+  setTimeout(() => $<HTMLInputElement>('#c-name', s.el).focus(), 300);
+}
+/** Delete any category, built-in ones too. Its items and history move to Other (or Uncategorised if Other is gone). */
+async function deleteCategory(id: string) {
+  const to = 'other';
+  if (id !== to) {
+    for (const i of S.items.filter(i => i.categoryId === id)) { i.categoryId = to; await db.put('items', i); }
+    for (const p of S.purchases.filter(p => p.categoryId === id)) { p.categoryId = to; await db.put('purchases', p); }
+    for (const e of S.events.filter(e => e.categoryId === id)) { e.categoryId = to; await db.put('events', e); }
+  }
+  await db.del('categories', id);
+  S.cats = S.cats.filter(c => c.id !== id);
+  collapsedCats.delete(id);
+  if (S.cat === id) S.cat = 'all';
+}
+function openCategorySheet(selectedId: string, onPick: (id: string) => void) {
+  let current = selectedId;
+  const s = sheet(`<div class="search"><span>🔎</span><input id="cat-q" type="search" placeholder="Search categories" autocomplete="off"></div>
+    <div id="cat-list"></div>
+    <div class="sheet-foot"><button type="button" class="btn tonal" id="cat-new">＋ New category</button></div>`, { title: 'Category', full: true });
+  const paint = () => {
+    const q = $<HTMLInputElement>('#cat-q', s.el).value.trim().toLowerCase();
+    const cats = [...S.cats].sort((a, b) => a.name.localeCompare(b.name, 'en', { sensitivity: 'base' }))
+      .filter(c => !q || c.name.toLowerCase().includes(q) || c.icon.includes(q));
+    $('#cat-list', s.el).innerHTML = cats.length
+      ? `<ul class="cat-sheet">${cats.map(c => `<li><button type="button" class="cat-row ${c.id === current ? 'on' : ''}" data-c="${c.id}"><span class="cat-row-icon">${c.icon}</span><span class="cat-row-name">${esc(c.name)}</span>${c.id === current ? '<span class="cat-row-check">✓</span>' : ''}</button></li>`).join('')}</ul>`
+      : `<div class="empty"><p>No categories match that search.</p></div>`;
+    s.el.querySelectorAll<HTMLElement>('.cat-row').forEach(b => b.onclick = () => { onPick(b.dataset.c!); s.close(); });
+  };
+  $('#cat-q', s.el).addEventListener('input', paint);
+  $('#cat-new', s.el).onclick = () => openNewCategory(c => { current = c.id; onPick(c.id); s.close(); });
+  paint();
+  setTimeout(() => $<HTMLInputElement>('#cat-q', s.el).focus(), 300);
 }
 
 // ---------- item editor ----------
@@ -543,11 +748,15 @@ function editItem(existing: Item | null, prefill: Partial<Item> = {}, autoCat = 
       <div class="date-row"><input id="e-exp" type="date" value="${it.noExpiry || it.expiryStatus === 'reading' || it.expiryStatus === 'failed' ? '' : (it.expiry ?? '')}" ${it.noExpiry ? 'disabled' : ''}><button class="btn tonal" id="e-scan">📷 Scan</button><button type="button" class="btn ghost" id="e-clear">Clear</button></div>
       <label class="toggle"><input type="checkbox" id="e-noexp" ${it.noExpiry ? 'checked' : ''}> No expiry</label>
       <small class="muted" id="e-exp-note">${expiryNote(it)}</small></div>
-    <div class="field"><span>Category <small class="muted" id="e-cat-ai"></small></span><div class="cat-pick" id="e-cats">${S.cats.map(c => `<button class="chip ${c.id === it.categoryId ? 'on' : ''}" data-c="${c.id}">${c.icon} ${esc(c.name)}</button>`).join('')}</div></div>
+    <div class="field"><span>Category <small class="muted" id="e-cat-ai"></small></span><div class="cat-pick" id="e-cats"></div></div>
     <div class="field"><span>Stored in</span><div class="seg" id="e-loc">${(['Fridge', 'Freezer', 'Pantry'] as Location[]).map(l => `<button data-l="${l}" class="${it.location === l ? 'on' : ''}">${{ Fridge: '❄️', Freezer: '🧊', Pantry: '🗄️' }[l]} ${l}</button>`).join('')}</div></div>
     <div class="two">
       <div class="field"><span>Quantity</span><div class="stepper"><button data-q="-1">−</button><input id="e-qty" type="number" min="1" inputmode="numeric" value="${it.quantity}"><button data-q="1">＋</button></div></div>
       <label class="field"><span>Price (AUD)</span><input id="e-price" type="number" min="0" step="0.01" inputmode="decimal" value="${it.price ?? ''}" placeholder="Optional"><small class="muted" id="e-price-note"></small></label>
+    </div>
+    <div class="two">
+      <div class="field"><span>Collection</span><select id="e-col">${collectionOptions(colId(it))}</select></div>
+      <label class="field"><span>Bought on</span><input id="e-bought" type="date" value="${it.boughtOn ?? ''}" max="${todayISO()}"><small class="muted">Optional</small></label>
     </div>
     <details class="more"><summary>More</summary>
       <label class="field"><span>Opened on</span><input id="e-open" type="date" value="${it.opened ?? ''}"></label>
@@ -590,14 +799,21 @@ function editItem(existing: Item | null, prefill: Partial<Item> = {}, autoCat = 
     if (id === 'household') setNoExpiry(true, true);
     else if (noExpirySuggested) setNoExpiry(false, true);
   };
+  let paintCats: () => void;
   const setCat = (id: string) => {
     it.categoryId = id;
-    el.querySelectorAll<HTMLElement>('[data-c]').forEach(b => b.classList.toggle('on', b.dataset.c === id));
+    paintCats();
     maybeSuggestNoExpiry(id);
   };
+  paintCats = () => {
+    $('#e-cats', el).innerHTML = catQuickChips(it.categoryId);
+    $('#e-cats', el).querySelectorAll<HTMLElement>('[data-c]').forEach(b => b.onclick = () => { catTouched = true; markDirty(); setCat(b.dataset.c!); $('#e-cat-ai', el).textContent = ''; });
+    $('[data-cat-more]', el).onclick = () => openCategorySheet(it.categoryId, id => { catTouched = true; markDirty(); setCat(id); $('#e-cat-ai', el).textContent = ''; });
+  };
+  paintCats();
   const setLocFor = (id: string) => { if (existing) return; it.location = defaultLocation(id); el.querySelectorAll<HTMLElement>('[data-l]').forEach(x => x.classList.toggle('on', x.dataset.l === it.location)); };
-  el.querySelectorAll<HTMLElement>('[data-c]').forEach(b => b.onclick = () => { catTouched = true; markDirty(); setCat(b.dataset.c!); $('#e-cat-ai', el).textContent = ''; });
   el.querySelectorAll<HTMLElement>('[data-l]').forEach(b => b.onclick = () => { markDirty(); it.location = b.dataset.l as Location; el.querySelectorAll<HTMLElement>('[data-l]').forEach(x => x.classList.toggle('on', x === b)); });
+  bindCollectionSelect($<HTMLSelectElement>('#e-col', el), markDirty);
   const qty = $<HTMLInputElement>('#e-qty', el);
   el.querySelectorAll<HTMLElement>('[data-q]').forEach(b => b.onclick = () => { markDirty(); qty.value = String(Math.max(1, parseQty(qty.value) + +b.dataset.q!)); });
   el.querySelectorAll('input, select, textarea').forEach(n => {
@@ -609,7 +825,7 @@ function editItem(existing: Item | null, prefill: Partial<Item> = {}, autoCat = 
   const autoCategorise = async () => {
     const name = $<HTMLInputElement>('#e-name', el).value.trim();
     if (!name || catTouched) return;
-    const g = guessCategory(name); if (g !== 'other') { setCat(g); setLocFor(g); }
+    const g = catKey(guessCategory(name)); if (g !== 'other') { setCat(g); setLocFor(g); }
     if (!hasKey(S.settings)) return;
     $('#e-cat-ai', el).textContent = '· AI thinking…';
     try {
@@ -646,6 +862,8 @@ function editItem(existing: Item | null, prefill: Partial<Item> = {}, autoCat = 
     it.quantity = parseQty(qty.value);
     it.price = parseMoney($<HTMLInputElement>('#e-price', el).value);
     it.brand = $<HTMLInputElement>('#e-brand', el).value.trim() || undefined;
+    it.collectionId = pickedCollection($<HTMLSelectElement>('#e-col', el).value);
+    it.boughtOn = $<HTMLInputElement>('#e-bought', el).value || undefined;
   };
   $('#e-scan', el).onclick = async () => {
     readForm();
@@ -663,7 +881,7 @@ function editItem(existing: Item | null, prefill: Partial<Item> = {}, autoCat = 
     const added = existing ? Math.max(0, it.quantity - existing.quantity) : it.quantity;
     if (it.noExpiry) { it.expiry = undefined; it.expiryMonthOnly = undefined; it.expiryRaw = undefined; it.expiryStatus = undefined; await cancelExpiryJobs(it.id); }
     await saveItem(it);
-    if (it.price && added) await recordPurchase(it, added, it.price);
+    if (it.price && added) await recordPurchase(it, added, it.price, existing ? Date.now() : purchaseTime(it.boughtOn));
     s.close(); S.tab = 'items';
     if (!existing) await afterNewItem(it, nextAdd ?? 'menu', it.expiryStatus === 'reading');
     else { render(); toast('Saved'); }
@@ -674,7 +892,7 @@ function editItem(existing: Item | null, prefill: Partial<Item> = {}, autoCat = 
     await db.del('items', it.id); S.items = S.items.filter(x => x.id !== it.id); s.close(); render();
   });
   const finish = async (type: 'used' | 'binned') => {
-    const ev: WasteEvent = { id: db.uid(), name: existing!.name, categoryId: existing!.categoryId, type, at: Date.now(), unitPrice: existing!.price, quantity: 1 };
+    const ev: WasteEvent = { id: db.uid(), itemId: existing!.id, name: existing!.name, categoryId: existing!.categoryId, collectionId: colId(S.items.find(x => x.id === existing!.id) ?? existing!), type, at: Date.now(), unitPrice: existing!.price, quantity: 1 };
     await db.put('events', ev); S.events.push(ev);
     const cur = { ...(S.items.find(x => x.id === existing!.id) ?? existing!) };
     if (cur.quantity > 1) { cur.quantity--; await saveItem(cur); toast(`${type === 'used' ? 'Used' : 'Binned'} one. ${cur.quantity} left.`); }
@@ -947,13 +1165,39 @@ function statsView() {
         <ul class="spend-list">${byCat.map(([id, n]) => { const c = catOf(id); return `<li><span>${c.icon} ${esc(c.name)}</span><b>${money(n)}</b><i class="sbar" style="width:${catMax ? Math.max(4, (n / catMax) * 100) : 0}%"></i></li>`; }).join('')}</ul>` : '<p class="muted">Add a price when you save an item, or scan a receipt, to start tracking spend.</p>'}
       <p class="waste-line">🗑️ <b>${money(wasted)}</b> wasted on binned items this month</p>
     </section>
+    ${collectionStatsHtml()}
     <section class="panel"><h3>Last 30 days</h3>
       <div class="bar"><i style="width:${100 - pct}%"></i></div>
       <div class="row-between"><span>✅ Used <b>${used}</b></span><span>🗑️ Binned <b>${binned}</b></span></div>
       <p class="muted">${used + binned ? `You binned ${pct}% of what you finished.` : 'Tap “Used it” or “Binned it” on an item to start tracking waste.'}</p></section>
     ${top.length ? `<section class="panel"><h3>Most often binned</h3><ul class="plain">${top.map(([n, c]) => `<li><span>${esc(n)}</span><b>${c}×</b></li>`).join('')}</ul></section>` : ''}`;
 }
+function collectionTotals(id: string | 'all') {
+  const inCol = (x: { collectionId?: string }) => id === 'all' || colId(x) === id;
+  const ev = S.events.filter(inCol);
+  const evValue = (type: 'used' | 'binned') => ev.filter(e => e.type === type).reduce((s, e) => s + (e.unitPrice ?? 0) * (e.quantity ?? 1), 0);
+  const left = active().filter(inCol);
+  return {
+    spent: S.purchases.filter(inCol).reduce((s, p) => s + p.total, 0),
+    used: ev.filter(e => e.type === 'used').reduce((s, e) => s + (e.quantity ?? 1), 0), usedValue: evValue('used'),
+    wasted: ev.filter(e => e.type === 'binned').reduce((s, e) => s + (e.quantity ?? 1), 0), wastedValue: evValue('binned'),
+    left: left.reduce((s, i) => s + i.quantity, 0), leftValue: left.reduce((s, i) => s + (i.price ?? 0) * i.quantity, 0),
+  };
+}
+function collectionStatsHtml() {
+  const row = (id: string, name: string) => {
+    const t = collectionTotals(id);
+    return `<li class="col-stat" data-colstat="${esc(id)}"><div class="col-stat-h"><b>${esc(name)}</b><b>${money(t.spent)}</b></div>
+      <div class="col-stat-grid"><span>✅ Used <b>${t.used}</b><small>${money(t.usedValue)}</small></span>
+        <span>🗑️ Wasted <b>${t.wasted}</b><small>${money(t.wastedValue)}</small></span>
+        <span>🧺 Left <b>${t.left}</b><small>${money(t.leftValue)}</small></span></div></li>`;
+  };
+  return `<section class="panel"><h3>By collection</h3>
+    <p class="muted">All time. Spend is what you paid; used, wasted and left count items, with their value at the price you entered.</p>
+    <ul class="col-stats">${row('all', 'All collections')}${sortedCols().map(c => row(c.id, c.name)).join('')}</ul></section>`;
+}
 function bindStats() {
+  document.querySelectorAll<HTMLElement>('[data-colstat]').forEach(b => b.onclick = () => { S.tab = 'items'; S.col = b.dataset.colstat!; render(); window.scrollTo(0, 0); });
   document.querySelectorAll<HTMLElement>('[data-jump]').forEach(b => b.onclick = () => showStatus(b.dataset.jump as StatusFilter));
 }
 
@@ -978,8 +1222,17 @@ function settingsView() {
       <p class="muted">Notifications: <b>${({ granted: 'On', denied: 'Blocked (turn on in iPhone Settings › Notifications › Pantry)', default: 'Off', unsupported: 'Not available here. Open the app from your Home Screen.' } as Record<string, string>)[notif]}</b>. They appear when you open the app. On iPhone this needs iOS 16.4+ and the app added to your Home Screen.</p>
       ${notif === 'default' ? '<button class="btn tonal" id="s-notif">Turn on notifications</button>' : ''}
     </section>
+    <section class="panel"><h3>Collections</h3>
+      <p class="muted">Group items by grocery run, like a stock-up or a shop for guests. New items go to Regular unless you pick another.</p>
+      <ul class="plain cats">${sortedCols().map(c => `<li><span>${esc(c.name)} <small class="muted">${active().filter(i => colId(i) === c.id).length}</small></span><span class="row-btns">
+        <button class="icon-btn" data-editcol="${esc(c.id)}" aria-label="Rename ${esc(c.name)}">✎</button>
+        ${c.id === db.REGULAR_ID ? '<span class="icon-btn" aria-hidden="true"></span>' : `<button class="icon-btn" data-delcol="${esc(c.id)}" aria-label="Delete ${esc(c.name)}">✕</button>`}</span></li>`).join('')}</ul>
+      <button class="btn tonal" id="s-addcol">＋ New collection</button>
+    </section>
     <section class="panel"><h3>Categories</h3>
-      <ul class="plain cats">${S.cats.map(c => `<li><span>${c.icon} ${esc(c.name)}</span>${c.preset ? '' : `<button class="icon-btn" data-delcat="${c.id}" aria-label="Delete">✕</button>`}</li>`).join('')}</ul>
+      <ul class="plain cats">${S.cats.map(c => `<li><span>${c.icon} ${esc(c.name)}</span><span class="row-btns">
+        <button class="icon-btn" data-editcat="${c.id}" aria-label="Edit ${esc(c.name)}">✎</button>
+        <button class="icon-btn" data-delcat="${c.id}" aria-label="Delete ${esc(c.name)}">✕</button></span></li>`).join('')}</ul>
       <button class="btn tonal" id="s-addcat">＋ New category</button>
     </section>
     <section class="panel"><h3>Backup</h3>
@@ -1004,25 +1257,23 @@ function bindSettings() {
   days.addEventListener('change', () => setDays(+days.value || 0));
   document.querySelectorAll<HTMLElement>('[data-d]').forEach(b => b.onclick = () => setDays(st.leadDays + +b.dataset.d!));
   $('#s-notif')?.addEventListener('click', async () => { await Notification.requestPermission(); render(); checkReminders(true); });
+  document.querySelectorAll<HTMLElement>('[data-editcat]').forEach(b => b.onclick = () => { const c = S.cats.find(x => x.id === b.dataset.editcat); if (c) openCategoryEditor(c); });
   document.querySelectorAll<HTMLElement>('[data-delcat]').forEach(b => b.onclick = async () => {
-    const id = b.dataset.delcat!; const n = S.items.filter(i => i.categoryId === id && i.status === 'active').length;
-    if (!confirm(`Delete this category?${n ? ` ${n} item(s) will move to Other.` : ''}`)) return;
-    for (const i of S.items.filter(i => i.categoryId === id)) { i.categoryId = 'other'; await db.put('items', i); }
-    await db.del('categories', id); S.cats = S.cats.filter(c => c.id !== id); render();
+    const id = b.dataset.delcat!; const c = S.cats.find(x => x.id === id); if (!c) return;
+    const n = active().filter(i => i.categoryId === id).length;
+    const dest = id === 'other' || !S.cats.some(x => x.id === 'other') ? FALLBACK_CAT.name : catOf('other').name;
+    if (!confirm(`Delete “${c.name}”?${n ? ` ${n} item${n === 1 ? '' : 's'} will move to ${dest}.` : ''}`)) return;
+    await deleteCategory(id); render(); toast(`Deleted ${c.name}`);
   });
-  $('#s-addcat').onclick = () => {
-    let icon = ICON_CHOICES[0];
-    const s = sheet(`<label class="field"><span>Name</span><input id="c-name" placeholder="e.g. Baby food"></label>
-      <div class="field"><span>Icon</span><div class="icons">${ICON_CHOICES.map((i, n) => `<button class="${n ? '' : 'on'}" data-i="${i}">${i}</button>`).join('')}</div>
-      <input id="c-custom" placeholder="…or type any emoji" maxlength="4"></div>
-      <div class="sheet-foot"><button class="btn ghost" data-close>Cancel</button><button class="btn primary" id="c-save">Add</button></div>`, { title: 'New category' });
-    s.el.querySelectorAll<HTMLElement>('[data-i]').forEach(b => b.onclick = () => { icon = b.dataset.i!; s.el.querySelectorAll('[data-i]').forEach(x => x.classList.toggle('on', x === b)); });
-    $('#c-save', s.el).onclick = async () => {
-      const name = $<HTMLInputElement>('#c-name', s.el).value.trim(); if (!name) return toast('Give it a name');
-      const c: Category = { id: 'c-' + db.uid().slice(0, 8), name, icon: $<HTMLInputElement>('#c-custom', s.el).value.trim() || icon };
-      await db.put('categories', c); S.cats.push(c); s.close(); render();
-    };
-  };
+  document.querySelectorAll<HTMLElement>('[data-editcol]').forEach(b => b.onclick = () => { const c = S.cols.find(x => x.id === b.dataset.editcol); if (c) openCollectionEditor(c); });
+  document.querySelectorAll<HTMLElement>('[data-delcol]').forEach(b => b.onclick = async () => {
+    const id = b.dataset.delcol!; const c = S.cols.find(x => x.id === id); if (!c) return;
+    const n = S.items.filter(i => i.collectionId === id).length;
+    if (!confirm(`Delete “${c.name}”?${n ? ` Its ${n} item${n === 1 ? '' : 's'} and spending will move to Regular.` : ''}`)) return;
+    await deleteCollection(id); render(); toast(`Deleted ${c.name}`);
+  });
+  $('#s-addcol').onclick = () => openCollectionEditor(null);
+  $('#s-addcat').onclick = () => openNewCategory();
   $('#s-export').onclick = async () => {
     const data = JSON.stringify(await db.exportData(), null, 2);
     const file = new File([data], `pantry-backup-${todayISO()}.json`, { type: 'application/json' });
@@ -1087,11 +1338,18 @@ async function seedDemo() {
     await saveItem(it);
     await recordPurchase(it, quantity, price, Date.now() - boughtAgo * 864e5);
   }
-  const salad: Purchase = { id: db.uid(), name: 'Bagged Salad', categoryId: 'produce', unitPrice: 3.5, quantity: 1, total: 3.5, at: Date.now() - 3 * 864e5 };
+  const guests: Collection = { id: 'col-guests', name: 'Guests – Dec', createdAt: Date.now() };
+  await db.put('collections', guests); if (!S.cols.some(c => c.id === guests.id)) S.cols.push(guests);
+  for (const [name, categoryId, location, quantity, days, price] of [['Sparkling Water 10pk', 'drinks', 'Pantry', 2, 200, 7.5], ['Frozen Prawns 1kg', 'frozen', 'Freezer', 1, 90, 24]] as const) {
+    const it: Item = { ...blank(), name, categoryId, location, quantity, price, expiry: d(days), collectionId: guests.id, boughtOn: todayISO() };
+    await saveItem(it);
+    await recordPurchase(it, quantity, price);
+  }
+  const salad: Purchase = { id: db.uid(), name: 'Bagged Salad', categoryId: 'produce', collectionId: db.REGULAR_ID, unitPrice: 3.5, quantity: 1, total: 3.5, at: Date.now() - 3 * 864e5 };
   await db.put('purchases', salad); S.purchases.push(salad);
-  const ev: WasteEvent = { id: db.uid(), name: 'Bagged Salad', categoryId: 'produce', type: 'binned', at: Date.now() - 3 * 864e5, unitPrice: 3.5, quantity: 1 };
+  const ev: WasteEvent = { id: db.uid(), name: 'Bagged Salad', categoryId: 'produce', collectionId: db.REGULAR_ID, type: 'binned', at: Date.now() - 3 * 864e5, unitPrice: 3.5, quantity: 1 };
   await db.put('events', ev); S.events.push(ev);
-  const used: WasteEvent = { id: db.uid(), name: 'Full Cream Milk 2L', categoryId: 'dairy', type: 'used', at: Date.now() - 5 * 864e5, unitPrice: 3.2, quantity: 1 };
+  const used: WasteEvent = { id: db.uid(), name: 'Full Cream Milk 2L', categoryId: 'dairy', collectionId: db.REGULAR_ID, type: 'used', at: Date.now() - 5 * 864e5, unitPrice: 3.2, quantity: 1 };
   await db.put('events', used); S.events.push(used);
   const si: ShopItem = { id: db.uid(), name: 'Eggs', done: false, addedAt: Date.now() }; await db.put('shopping', si); S.shop.push(si);
 }
