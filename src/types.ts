@@ -28,7 +28,7 @@ export interface Item {
 export interface Category { id: string; name: string; icon: string; preset?: boolean; }
 /** A grocery run ("spree"), e.g. Regular, Stocking up, Guests – Dec. Every item belongs to one. */
 export interface Collection { id: string; name: string; builtin?: boolean; createdAt: number; }
-export interface ShopItem { id: string; name: string; done: boolean; addedAt: number; fromItemId?: string; }
+export interface ShopItem { id: string; name: string; done: boolean; addedAt: number; fromItemId?: string; collectionId?: string; } // no collectionId = Regular
 
 export type Provider = 'gemini' | 'openai';
 export interface Settings {

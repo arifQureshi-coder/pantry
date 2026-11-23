@@ -299,6 +299,97 @@ await page.locator('[data-a=manual]').click();
 await page.waitForSelector('#e-col');
 check(await page.locator('#e-col').inputValue() === 'regular' && await page.locator('#e-bought').inputValue() === '', 'manual add defaults to Regular with no date');
 
+// ---------- 8. Dates to check: No expiry / clearing / setting a date removes the item ----------
+await wipe();
+await page.goto(BASE + '?demo&shot=dates', { waitUntil: 'networkidle' });
+await page.waitForSelector('.tile');
+const toCheck = async () => (await page.locator('#dates-check').count()) ? (await page.locator('#dates-check b').innerText()) : 'none';
+check(await toCheck() === '3 dates to check', 'three dates to check to start', await toCheck());
+await page.locator('[data-view=list]').click(); await page.waitForSelector('.cat-group'); await expandAll();
+await page.locator('.item', { hasText: 'Baby Spinach' }).click(); await page.locator('#e-clear').click(); await page.locator('#e-save').click(); await closed();
+check(await toCheck() === '2 dates to check', 'clearing a suggested date removes it from Dates to check', await toCheck());
+await page.locator('.item', { hasText: 'Greek Yoghurt' }).click(); await page.locator('#e-clear').click(); await page.locator('#e-save').click(); await closed();
+check(await toCheck() === '1 date to check', 'clearing an unreadable date removes it too', await toCheck());
+await page.locator('#dates-check').click(); await page.waitForSelector('[data-noexp]');
+await page.locator('[data-noexp]').first().click();
+await closed();
+check(await toCheck() === 'none', '"No expiry" in Dates to check removes the last one', await toCheck());
+
+// ---------- 9. Multi-select: change category, No expiry, delete ----------
+await wipe();
+await page.goto(BASE + '?demo&shot=dates', { waitUntil: 'networkidle' });
+await page.waitForSelector('.tile');
+await page.locator('#sel-btn').click();
+await page.waitForSelector('#sel-bar');
+check(await page.locator('.cat-group.closed').count() === 0 && await page.locator('.item .sel-check').count() === 11, 'Select from Grid shows every item with a tick box');
+await page.locator('.item', { hasText: 'Chicken Thighs' }).click();
+await page.locator('.item', { hasText: 'Sourdough' }).click();
+check(/2 selected/.test(await page.locator('#sel-bar').innerText()), 'two selected');
+await page.locator('#sel-cat').click();
+await page.waitForSelector('.cat-row');
+await page.locator('.cat-row[data-c="snacks"]').click();
+await page.waitForSelector('#sel-bar', { state: 'detached' });
+m = await readDb();
+check(['Chicken Thighs 500g', 'Sourdough Loaf'].every(n => m.items.find(i => i.name === n)?.categoryId === 'snacks'), 'bulk category change moved both to Snacks');
+check(m.purchases.filter(p => /Chicken|Sourdough/.test(p.name)).every(p => p.categoryId === 'snacks'), 'their spend moved category too');
+await page.locator('#sel-btn').click();
+for (const n of ['Greek Yoghurt', 'Full Cream Milk', 'Baby Spinach']) await page.locator('.item', { hasText: n }).click();
+await page.locator('#sel-noexp').click();
+await page.waitForSelector('#sel-bar', { state: 'detached' });
+m = await readDb();
+check(['Greek Yoghurt', 'Full Cream Milk 2L', 'Baby Spinach'].every(n => { const i = m.items.find(x => x.name === n); return i.noExpiry && !i.expiry && !i.expiryStatus; }), 'bulk No expiry set on all three, dates cleared');
+check(await toCheck() === 'none', 'bulk No expiry cleared Dates to check', await toCheck());
+await page.locator('#sel-btn').click();
+await page.locator('.item', { hasText: 'Tim Tams' }).click();
+await page.locator('.item', { hasText: 'Spaghetti' }).click();
+await page.locator('#sel-del').click();
+await page.waitForSelector('#sel-bar', { state: 'detached' });
+m = await readDb();
+check(m.items.length === 9 && !m.items.some(i => /Tim Tams|Spaghetti/.test(i.name)), 'bulk delete removed the two selected items', String(m.items.length));
+check(m.purchases.some(p => /Tim Tams/.test(p.name)), 'bulk delete keeps spend history, like single delete');
+
+// ---------- 10. Shopping list by collection ----------
+await page.locator('[data-view=list]').click(); await page.waitForSelector('.cat-group');
+await expandAll();
+await page.locator('.item', { hasText: 'Frozen Prawns' }).click();
+await page.locator('#e-used').click();
+await closed();
+m = await page.evaluate(() => new Promise(res => { const r = indexedDB.open('pantry'); r.onsuccess = () => { const q = r.result.transaction('shopping').objectStore('shopping').getAll(); q.onsuccess = () => { r.result.close(); res(q.result); }; }; }));
+const prawnShop = m.find(x => /Prawns/.test(x.name));
+check(prawnShop?.collectionId === 'col-guests', 'used-up guest item lands on the shopping list under Guests', JSON.stringify(prawnShop));
+await page.locator('[data-tab=shopping]').click();
+await page.waitForSelector('#shop-col');
+check(await page.locator('#shop-col').inputValue() === 'all', 'shopping dropdown defaults to All collections');
+const heads = await page.locator('.shop-group h3').allInnerTexts();
+check(heads.length === 2 && /Regular/i.test(heads[0]) && /Guests/i.test(heads[1]), 'shopping list grouped by collection (old items under Regular)', heads.join(' | '));
+await page.locator('#shop-col').selectOption('col-guests');
+let shopNames = await page.locator('.shop .name').allInnerTexts();
+check(shopNames.length === 1 && /Prawns/.test(shopNames[0]), 'Guests shows only its shopping items', shopNames.join(', '));
+await page.locator('#shop-in').fill('Napkins'); await page.locator('#shop-in').press('Enter');
+await page.locator('#shop-col').selectOption('all');
+await page.locator('#shop-in').fill('Bread'); await page.locator('#shop-in').press('Enter');
+m = await page.evaluate(() => new Promise(res => { const r = indexedDB.open('pantry'); r.onsuccess = () => { const q = r.result.transaction('shopping').objectStore('shopping').getAll(); q.onsuccess = () => { r.result.close(); res(q.result); }; }; }));
+check(m.find(x => x.name === 'Napkins')?.collectionId === 'col-guests' && m.find(x => x.name === 'Bread')?.collectionId === 'regular', 'manual adds go to the picked collection, or Regular under All');
+
+// ---------- 11. App-wide search ----------
+await page.locator('[data-tab=items]').click();
+await page.locator('#col-filter').selectOption('regular'); // search still looks everywhere
+await page.locator('#q').fill('frozen');
+const results = (await page.locator('#search-results .item').allInnerTexts()).map(t => t.replace(/\s+/g, ' '));
+check(results.some(t => /Frozen Peas 1kg Frozen · Regular/.test(t)), 'search shows category and collection', results.join(' | '));
+await page.locator('#q').fill('napkin');
+const shopHit = (await page.locator('#search-results .item').allInnerTexts()).map(t => t.replace(/\s+/g, ' '));
+check(shopHit.length === 1 && /Shopping list · Guests/.test(shopHit[0]), 'search finds shopping items, labelled as such', shopHit.join(' | '));
+await page.locator('#q').fill('sparkling');
+check(await page.locator('[data-jump-item]').count() === 1, 'search finds items in other collections than the one picked');
+await page.locator('[data-jump-item]').click();
+await page.waitForSelector('.item.flash');
+check(await page.locator('#col-filter').inputValue() === 'all' && /Sparkling/.test(await page.locator('.item.flash').innerText()), 'tapping a result opens the List at that item and highlights it');
+await page.locator('#q').fill('napkin');
+await page.locator('[data-jump-shop]').click();
+await page.waitForSelector('[data-sid].flash');
+check(/Napkins/.test(await page.locator('[data-sid].flash').innerText()), 'tapping a shopping result opens the shopping list at it');
+
 check(!errors.length, 'no page errors', errors.join(' | '));
 await browser.close();
 if (process.exitCode) { console.error('Some checks failed'); process.exit(1); }

@@ -283,3 +283,18 @@ button.card:active { background: var(--surface-2); }
 .tb-right { display: flex; align-items: center; min-width: 0; }
 .tb-right .col-filter { max-width: 160px; }
 .stat-custom { margin-bottom: 4px; }
+.tb-left { display: flex; align-items: center; gap: 6px; }
+/* multi-select */
+.item .sel-check { margin-right: -2px; }
+.item.picked { background: color-mix(in srgb, var(--accent) 10%, var(--surface)); }
+.item.picked .sel-check { background: var(--accent); border-color: var(--accent); }
+.sel-bar { position: fixed; left: 8px; right: 8px; bottom: calc(76px + env(safe-area-inset-bottom)); z-index: 20; background: var(--surface); border: 1px solid var(--border); border-radius: 16px; box-shadow: var(--shadow); padding: 10px 12px; }
+.sel-top { display: flex; align-items: center; gap: 12px; margin-bottom: 8px; } .sel-top b { flex: 1; }
+.sel-actions { display: grid; grid-template-columns: 1fr 1fr 1fr; gap: 6px; } .sel-actions .btn { padding: 8px 4px; font-size: 14px; min-height: 40px; }
+.sel-check { width: 24px; height: 24px; border-radius: 50%; border: 2px solid var(--border); display: grid; place-items: center; color: var(--accent-ink); font-size: 14px; flex: none; }
+.page:has(.sel-bar) #results { padding-bottom: 130px; }
+/* search + shopping groups */
+.sr-go { color: var(--muted); font-size: 20px; flex: none; }
+.item.flash { animation: flash 2s ease; }
+@keyframes flash { 0%, 40% { background: color-mix(in srgb, var(--accent) 25%, var(--surface)); } 100% { background: var(--surface); } }
+.shop-group { margin-bottom: 12px; }

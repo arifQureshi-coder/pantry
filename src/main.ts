@@ -25,7 +25,7 @@ const S = {
   tab: 'items' as Tab,
   items: [] as Item[], cats: [] as Category[], cols: [] as Collection[], col: 'all' as string, shop: [] as ShopItem[], events: [] as WasteEvent[], purchases: [] as Purchase[],
   settings: db.DEFAULT_SETTINGS as Settings,
-  q: '', cat: 'all', loc: 'all' as 'all' | Location, sort: 'expiry' as 'expiry' | 'name' | 'added', view: 'grid' as ItemsView,
+  shopCol: 'all' as string, q: '', cat: 'all', loc: 'all' as 'all' | Location, sort: 'expiry' as 'expiry' | 'name' | 'added', view: 'grid' as ItemsView,
   status: 'all' as StatusFilter,
 };
 const $ = <T extends HTMLElement = HTMLElement>(sel: string, root: ParentNode = document) => root.querySelector(sel) as T;
@@ -218,7 +218,7 @@ function render() {
       <button class="fab" id="fab" aria-label="Add item">＋</button>
       ${tabBtn('stats', '📊', 'Stats')}${tabBtn('settings', '⚙️', 'Settings')}
     </nav>`;
-  app.querySelectorAll<HTMLElement>('[data-tab]').forEach(b => b.onclick = () => { S.tab = b.dataset.tab as Tab; render(); window.scrollTo(0, 0); });
+  app.querySelectorAll<HTMLElement>('[data-tab]').forEach(b => b.onclick = () => { S.tab = b.dataset.tab as Tab; if (S.tab !== 'items') { selecting = false; selected.clear(); } render(); window.scrollTo(0, 0); });
   $('#fab').onclick = addMenu;
   ({ items: bindItems, shopping: bindShopping, stats: bindStats, settings: bindSettings })[S.tab]();
 }
@@ -239,9 +239,10 @@ function itemsView() {
         <span>📅</span><span><b>${check.length} date${check.length > 1 ? 's' : ''} to check</b><br><small>${esc(check.slice(0, 3).map(i => i.name).join(', '))}${check.length > 3 ? '…' : ''}</small></span><span>›</span></button>` : ''; })()}
     ${soon.length ? `<button class="banner ${soon.some(i => freshness(i) === 'expired') ? 'red' : ''}" id="soon">
         <span>⏰</span><span><b>${soon.length} item${soon.length > 1 ? 's' : ''} expiring soon</b><br><small>${esc(soon.slice(0, 3).map(i => i.name).join(', '))}${soon.length > 3 ? '…' : ''}</small></span><span>›</span></button>` : ''}
-    <div class="search"><span>🔎</span><input id="q" type="search" placeholder="Search items" value="${esc(S.q)}" autocomplete="off"></div>
+    <div class="search"><span>🔎</span><input id="q" type="search" placeholder="Search pantry and shopping list" value="${esc(S.q)}" autocomplete="off"></div>
     <div class="row-between">
-      <button class="btn-filter ${n ? 'on' : ''}" id="filter-btn" aria-label="${n ? `Filter, ${n} active` : 'Filter'}">Filter${n ? `<b class="fbadge">${n}</b>` : ''}</button>
+      <div class="tb-left"><button class="btn-filter ${n ? 'on' : ''}" id="filter-btn" aria-label="${n ? `Filter, ${n} active` : 'Filter'}">Filter${n ? `<b class="fbadge">${n}</b>` : ''}</button>
+      <button class="btn-filter ${selecting ? 'on' : ''}" id="sel-btn">${selecting ? 'Cancel' : 'Select'}</button></div>
       <div class="tb-right"><select id="sort" class="sort" aria-label="Sort">
         <option value="expiry" ${S.sort === 'expiry' ? 'selected' : ''}>⇅ Expiry</option>
         <option value="name" ${S.sort === 'name' ? 'selected' : ''}>⇅ A–Z</option>
@@ -250,7 +251,8 @@ function itemsView() {
       ${collectionSelect()}</div>
     </div>
     ${activeFilterChips()}
-    <div id="results">${resultsHtml()}</div>`;
+    <div id="results">${resultsHtml()}</div>
+    ${selecting ? selBarHtml() : ''}`;
 }
 function collectionSelect() {
   return `<select id="col-filter" class="sort col-filter" aria-label="Collection">
@@ -259,9 +261,89 @@ function collectionSelect() {
 }
 function resultsHtml() {
   const list = filtered();
-  if (S.view === 'grid' && S.cat === 'all' && !S.q) return gridView();
+  if (S.q.trim() && !selecting) return searchResults() + (list.length ? clearButton(list.length) : '');
+  if (S.view === 'grid' && S.cat === 'all' && !S.q && !selecting) return gridView();
   if (!list.length) return emptyState();
-  return groupedView(list) + clearButton(list.length);
+  return groupedView(list) + (selecting ? '' : clearButton(list.length));
+}
+
+// ---------- app-wide search: every pantry item (all categories and collections) plus the shopping list ----------
+function searchResults() {
+  const q = S.q.trim().toLowerCase();
+  const items = active().filter(i => `${i.name} ${i.brand ?? ''} ${catOf(i.categoryId).name} ${colOf(colId(i)).name}`.toLowerCase().includes(q))
+    .sort((a, b) => a.name.localeCompare(b.name));
+  const shop = S.shop.filter(s => !s.done && s.name.toLowerCase().includes(q)).sort((a, b) => a.name.localeCompare(b.name));
+  if (!items.length && !shop.length) return `<div class="empty"><div class="empty-icon">🔎</div><h3>No matches</h3><p>Nothing in your pantry or shopping list matches “${esc(S.q.trim())}”.</p></div>`;
+  const row = (attr: string, icon: string, name: string, sub: string) =>
+    `<li class="item sr" ${attr}><div class="thumb">${icon}</div><div class="meta"><div class="name">${esc(name)}</div><div class="sub">${esc(sub)}</div></div><span class="sr-go" aria-hidden="true">›</span></li>`;
+  return `<h3 class="filter-h">Search results · ${items.length + shop.length}</h3><ul class="list" id="search-results">
+    ${items.map(i => { const c = catOf(i.categoryId); return row(`data-jump-item="${i.id}"`, c.icon, i.name, `${c.name} · ${colOf(colId(i)).name}${i.quantity > 1 ? ` · ×${i.quantity}` : ''}`); }).join('')}
+    ${shop.map(s => row(`data-jump-shop="${s.id}"`, '🛒', s.name, `Shopping list · ${colOf(colId(s)).name}`)).join('')}</ul>`;
+}
+function flash(sel: string) {
+  const el = document.querySelector<HTMLElement>(sel); if (!el) return;
+  el.scrollIntoView({ block: 'center' });
+  el.classList.add('flash'); setTimeout(() => el.classList.remove('flash'), 2200);
+}
+/** Show one item in the List view: clear filters that hide it, open its category, scroll to it and highlight it. */
+function jumpToItem(id: string) {
+  const it = S.items.find(i => i.id === id); if (!it) return;
+  S.tab = 'items'; S.q = ''; S.view = 'list'; S.cat = 'all'; S.loc = 'all'; S.status = 'all';
+  if (S.col !== 'all' && colId(it) !== S.col) S.col = 'all';
+  expandedCats.add(catKey(it.categoryId));
+  render(); flash(`.item[data-id="${id}"]`);
+}
+function jumpToShop(id: string) {
+  const si = S.shop.find(s => s.id === id); if (!si) return;
+  S.tab = 'shopping'; S.q = '';
+  if (S.shopCol !== 'all' && colId(si) !== S.shopCol) S.shopCol = 'all';
+  render(); flash(`[data-sid="${id}"]`);
+}
+
+// ---------- multi-select ----------
+let selecting = false;
+const selected = new Set<string>();
+const selectedItems = () => active().filter(i => selected.has(i.id));
+function selBarHtml() {
+  const n = selected.size;
+  return `<div class="sel-bar" id="sel-bar"><div class="sel-top"><b>${n} selected</b>
+      <button type="button" class="link" id="sel-all">Select all</button><button type="button" class="link" id="sel-done">Done</button></div>
+    <div class="sel-actions">
+      <button type="button" class="btn tonal" id="sel-noexp" ${n ? '' : 'disabled'}>➖ No expiry</button>
+      <button type="button" class="btn tonal" id="sel-cat" ${n ? '' : 'disabled'}>🏷️ Category</button>
+      <button type="button" class="btn ghost danger" id="sel-del" ${n ? '' : 'disabled'}>🗑️ Delete</button></div></div>`;
+}
+function startSelect() { selecting = true; selected.clear(); render(); }
+function endSelect() { selecting = false; selected.clear(); render(); }
+function paintSelection() {
+  $('#results').innerHTML = resultsHtml(); bindResults();
+  $('#sel-bar')?.replaceWith(Object.assign(document.createElement('div'), { innerHTML: selBarHtml() }).firstElementChild!);
+  bindSelBar();
+}
+function bindSelBar() {
+  $('#sel-done')?.addEventListener('click', endSelect);
+  $('#sel-all')?.addEventListener('click', () => { for (const i of filtered()) selected.add(i.id); paintSelection(); });
+  $('#sel-noexp')?.addEventListener('click', async () => {
+    const list = selectedItems(); if (!list.length) return;
+    await setItemsNoExpiry(list);
+    toast(`${list.length} item${list.length === 1 ? '' : 's'} marked No expiry`); endSelect();
+  });
+  $('#sel-cat')?.addEventListener('click', () => {
+    const list = selectedItems(); if (!list.length) return;
+    const cats = new Set(list.map(i => catKey(i.categoryId)));
+    openCategorySheet(cats.size === 1 ? [...cats][0] : '', async id => {
+      for (const it of list) await saveItem({ ...it, categoryId: id });
+      toast(`Moved ${list.length} item${list.length === 1 ? '' : 's'} to ${catOf(id).name}`); endSelect();
+    });
+  });
+  $('#sel-del')?.addEventListener('click', async () => {
+    const list = selectedItems(); if (!list.length) return;
+    if (!confirm(`Delete ${list.length} item${list.length === 1 ? '' : 's'}?`)) return;
+    for (const it of list) { await cancelExpiryJobs(it.id); await db.del('items', it.id); }
+    const ids = new Set(list.map(i => i.id));
+    S.items = S.items.filter(x => !ids.has(x.id));
+    toast(`Deleted ${list.length} item${list.length === 1 ? '' : 's'}`); endSelect();
+  });
 }
 function groupedView(list: Item[]) {
   const byId = new Map<string, Item[]>();
@@ -271,7 +353,7 @@ function groupedView(list: Item[]) {
   }
   const groups = displayCats().map(c => ({ c, items: byId.get(c.id) ?? [] })).filter(g => g.items.length);
   // Folded by default; open while searching or when only one category is shown.
-  const openAll = !!S.q.trim() || groups.length === 1;
+  const openAll = selecting || !!S.q.trim() || groups.length === 1;
   return groups.map(({ c, items }) => {
     const closed = !openAll && !expandedCats.has(c.id);
     const levels = items.map(freshness);
@@ -325,7 +407,8 @@ function itemRow(i: Item, hideCat = false) {
     : esc(expiryLabel(i));
   const col = S.col === 'all' && colId(i) !== db.REGULAR_ID ? colOf(colId(i)).name : '';
   const bits = [hideCat ? '' : c.name, i.location, col, i.quantity > 1 ? `×${i.quantity}` : '', i.opened ? 'opened' : ''].filter(Boolean);
-  return `<li class="item" data-id="${i.id}">
+  const pick = selecting ? `<span class="check sel-check">${selected.has(i.id) ? '✓' : ''}</span>` : '';
+  return `<li class="item${selecting && selected.has(i.id) ? ' picked' : ''}" data-id="${i.id}">${pick}
     <div class="thumb">${i.image ? `<img src="${esc(i.image)}" alt="" loading="lazy" onerror="this.replaceWith(document.createTextNode('${c.icon}'))">` : c.icon}</div>
     <div class="meta"><div class="name">${esc(i.name)}</div><div class="sub">${esc(bits.join(' · '))}</div></div>
     <span class="pill ${pill}">${body}</span></li>`;
@@ -392,6 +475,8 @@ function bindItems() {
   $('#soon')?.addEventListener('click', () => showStatus('attention'));
   $('#dates-check')?.addEventListener('click', openDatesSheet);
   $('#filter-btn')?.addEventListener('click', openFilterSheet);
+  $('#sel-btn')?.addEventListener('click', () => selecting ? endSelect() : startSelect());
+  bindSelBar();
   $<HTMLSelectElement>('#sort')?.addEventListener('change', e => { S.sort = (e.target as HTMLSelectElement).value as any; render(); });
   document.querySelectorAll<HTMLElement>('[data-clear]').forEach(b => b.onclick = () => {
     const k = b.dataset.clear;
@@ -454,7 +539,13 @@ function bindResults() {
     $('#results').innerHTML = resultsHtml(); bindResults();
   });
   $('#clear-pantry')?.addEventListener('click', openClearPantry);
-  document.querySelectorAll<HTMLElement>('.item').forEach(li => li.onclick = () => editItem(S.items.find(i => i.id === li.dataset.id)!));
+  document.querySelectorAll<HTMLElement>('.item[data-id]').forEach(li => li.onclick = () => {
+    const id = li.dataset.id!;
+    if (selecting) { if (selected.has(id)) selected.delete(id); else selected.add(id); paintSelection(); return; }
+    editItem(S.items.find(i => i.id === id)!);
+  });
+  document.querySelectorAll<HTMLElement>('[data-jump-item]').forEach(li => li.onclick = () => jumpToItem(li.dataset.jumpItem!));
+  document.querySelectorAll<HTMLElement>('[data-jump-shop]').forEach(li => li.onclick = () => jumpToShop(li.dataset.jumpShop!));
 }
 
 // ---------- clear pantry ----------
@@ -705,7 +796,8 @@ async function saveItem(i: Item) {
     for (const e of S.events.filter(x => x.itemId === i.id)) { e.collectionId = i.collectionId; await db.put('events', e); }
   }
   // Bought it again: tick it off the shopping list
-  const match = S.shop.find(s => !s.done && s.name.toLowerCase() === i.name.toLowerCase());
+  const same = (s: ShopItem) => !s.done && s.name.toLowerCase() === i.name.toLowerCase();
+  const match = S.shop.find(s => same(s) && colId(s) === colId(i)) ?? S.shop.find(same);
   if (match && k < 0) { match.done = true; await db.put('shopping', match); }
 }
 
@@ -888,16 +980,19 @@ function editItem(existing: Item | null, prefill: Partial<Item> = {}, autoCat = 
   if (autoCat) autoCategorise();
   if (!existing) maybeSuggestNoExpiry(it.categoryId);
   $('#e-exp', el).addEventListener('change', () => {
+    dateTouched = true;
     it.expiryMonthOnly = false; it.expiryStatus = undefined; it.expiryRaw = undefined;
     if ($<HTMLInputElement>('#e-exp', el).value) setNoExpiry(false);
     else $('#e-exp-note', el).textContent = '';
   });
-  $('#e-clear', el).onclick = () => { markDirty(); it.noExpiry = undefined; noExpiryTouched = true; noExpirySuggested = false; clearDate(); if (existing) void cancelExpiryJobs(it.id); paintExpiry(); };
-  $('#e-noexp', el).onchange = () => { markDirty(); setNoExpiry($<HTMLInputElement>('#e-noexp', el).checked); };
+  // Set once the user clears, types or sets "No expiry": then a waiting/failed scan must not come back on save.
+  let dateTouched = false;
+  $('#e-clear', el).onclick = () => { markDirty(); dateTouched = true; it.noExpiry = undefined; noExpiryTouched = true; noExpirySuggested = false; clearDate(); if (existing) void cancelExpiryJobs(it.id); paintExpiry(); };
+  $('#e-noexp', el).onchange = () => { markDirty(); dateTouched = true; setNoExpiry($<HTMLInputElement>('#e-noexp', el).checked); };
 
   const readForm = () => {
     const live = existing && S.items.find(x => x.id === it.id);
-    if (live && !it.noExpiry) {
+    if (live && !it.noExpiry && !dateTouched) {
       it.expiry = live.expiry; it.expiryMonthOnly = live.expiryMonthOnly; it.expiryRaw = live.expiryRaw; it.expiryStatus = live.expiryStatus; it.noExpiry = live.noExpiry;
     }
     it.name = $<HTMLInputElement>('#e-name', el).value.trim();
@@ -906,6 +1001,7 @@ function editItem(existing: Item | null, prefill: Partial<Item> = {}, autoCat = 
     else {
       const typed = $<HTMLInputElement>('#e-exp', el).value || undefined;
       if (typed) { it.expiry = typed; it.expiryStatus = undefined; it.expiryRaw = undefined; it.noExpiry = undefined; }
+      else if (dateTouched) { it.expiry = undefined; it.expiryMonthOnly = undefined; it.expiryRaw = undefined; it.expiryStatus = undefined; }
       else if (it.expiryStatus !== 'reading' && it.expiryStatus !== 'pending') { it.expiry = undefined; }
     }
     it.opened = $<HTMLInputElement>('#e-open', el).value || undefined;
@@ -948,8 +1044,8 @@ function editItem(existing: Item | null, prefill: Partial<Item> = {}, autoCat = 
     if (cur.quantity > 1) { cur.quantity--; await saveItem(cur); toast(`${type === 'used' ? 'Used' : 'Binned'} one. ${cur.quantity} left.`); }
     else {
       cur.status = type; cur.finishedAt = Date.now(); await cancelExpiryJobs(cur.id); await saveItem(cur);
-      if (!S.shop.some(x => !x.done && x.name.toLowerCase() === cur.name.toLowerCase())) {
-        const si: ShopItem = { id: db.uid(), name: cur.name, done: false, addedAt: Date.now(), fromItemId: cur.id };
+      if (!S.shop.some(x => !x.done && x.name.toLowerCase() === cur.name.toLowerCase() && colId(x) === colId(cur))) {
+        const si: ShopItem = { id: db.uid(), name: cur.name, done: false, addedAt: Date.now(), fromItemId: cur.id, collectionId: colId(cur) };
         await db.put('shopping', si); S.shop.push(si);
       }
       toast(`${cur.name} added to your shopping list`);
@@ -1121,6 +1217,10 @@ function openDatesSheet() {
       const v = $<HTMLInputElement>('input', b.closest('.edit-date')!).value; if (!v) return toast('Pick a date');
       apply(b.dataset.use!, v, false);
     });
+    s.el.querySelectorAll<HTMLElement>('[data-noexp]').forEach(b => b.onclick = async () => {
+      const it = S.items.find(x => x.id === b.dataset.noexp); if (!it) return;
+      await setItemsNoExpiry([it]); render(); paint();
+    });
     s.el.querySelectorAll<HTMLElement>('[data-retake]').forEach(b => b.onclick = async () => {
       const it = S.items.find(x => x.id === b.dataset.retake); if (!it) return;
       const blob = await captureExpiryPhoto(); if (!blob) return;
@@ -1130,6 +1230,14 @@ function openDatesSheet() {
     });
   };
   bind();
+}
+/** Mark items as not expiring; also takes them out of Dates to check and stops any date read. */
+async function setItemsNoExpiry(items: Item[]) {
+  for (const it of items) {
+    await cancelExpiryJobs(it.id);
+    Object.assign(it, { noExpiry: true, expiry: undefined, expiryMonthOnly: undefined, expiryRaw: undefined, expiryStatus: undefined });
+    await saveItem(it);
+  }
 }
 function datesSheetHtml() {
   const rows = datesToCheck();
@@ -1148,6 +1256,7 @@ function datesSheetHtml() {
             ${ok ? `<button class="btn primary" data-confirm="${i.id}">Confirm</button>` : ''}
             <button class="btn ghost" data-edit="${i.id}">${ok ? 'Edit' : 'Enter date'}</button>
             <button class="btn ghost" data-retake="${i.id}">Retake</button>
+            <button class="btn ghost" data-noexp="${i.id}">No expiry</button>
           </div>
         </div>
       </li>`;
@@ -1156,19 +1265,34 @@ function datesSheetHtml() {
 
 
 // ---------- shopping ----------
+function shopRow(s: ShopItem) {
+  const src = s.fromItemId ? S.items.find(x => x.id === s.fromItemId) : undefined;
+  const c = src ? catOf(src.categoryId) : undefined;
+  return `<li class="item ${s.done ? 'done' : ''}" data-sid="${s.id}"><span class="check">${s.done ? '✓' : ''}</span><div class="meta"><div class="name">${esc(s.name)}</div>${c ? `<div class="sub">${c.icon} ${esc(c.name)}</div>` : ''}</div><button class="icon-btn" data-rm="${s.id}" aria-label="Remove">✕</button></li>`;
+}
 function shoppingView() {
-  const open = S.shop.filter(s => !s.done).sort((a, b) => b.addedAt - a.addedAt);
-  const done = S.shop.filter(s => s.done);
+  if (S.shopCol !== 'all' && !S.cols.some(c => c.id === S.shopCol)) S.shopCol = 'all';
+  const inCol = S.shop.filter(s => S.shopCol === 'all' || colId(s) === S.shopCol);
+  const open = inCol.filter(s => !s.done).sort((a, b) => b.addedAt - a.addedAt);
+  const done = inCol.filter(s => s.done);
+  const all = [...open, ...done];
+  // Grouped by collection under "All collections"; one plain list when a collection is picked.
+  const groups = S.shopCol === 'all' ? sortedCols().map(c => ({ c, rows: all.filter(s => colId(s) === c.id) })).filter(g => g.rows.length) : [];
   return `<header class="hdr"><h1>Shopping list</h1>${done.length ? '<button class="link" id="clear-done">Clear ticked</button>' : ''}</header>
-    <form class="search" id="add-shop"><span>＋</span><input id="shop-in" placeholder="Add to list" autocomplete="off" enterkeyhint="done"></form>
-    ${open.length || done.length ? `<ul class="list shop">${[...open, ...done].map(s => `
-      <li class="item ${s.done ? 'done' : ''}" data-sid="${s.id}"><span class="check">${s.done ? '✓' : ''}</span><div class="meta"><div class="name">${esc(s.name)}</div>${(() => { const src = s.fromItemId ? S.items.find(x => x.id === s.fromItemId) : undefined; if (!src) return ''; const c = catOf(src.categoryId); return `<div class="sub">${c.icon} ${esc(c.name)}</div>`; })()}</div><button class="icon-btn" data-rm="${s.id}" aria-label="Remove">✕</button></li>`).join('')}</ul>`
+    <div class="row-between"><span class="muted">${open.length} to buy</span>
+      <select id="shop-col" class="sort col-filter" aria-label="Collection"><option value="all" ${S.shopCol === 'all' ? 'selected' : ''}>All collections</option>
+      ${sortedCols().map(c => `<option value="${esc(c.id)}" ${S.shopCol === c.id ? 'selected' : ''}>${esc(c.name)}</option>`).join('')}</select></div>
+    <form class="search" id="add-shop"><span>＋</span><input id="shop-in" placeholder="Add to ${esc(S.shopCol === 'all' ? colOf(db.REGULAR_ID).name : colOf(S.shopCol).name)}" autocomplete="off" enterkeyhint="done"></form>
+    ${all.length ? (S.shopCol === 'all'
+      ? groups.map(g => `<section class="shop-group" data-shopcol="${esc(g.c.id)}"><h3 class="filter-h">${esc(g.c.name)} <span class="muted">${g.rows.filter(s => !s.done).length}</span></h3><ul class="list shop">${g.rows.map(shopRow).join('')}</ul></section>`).join('')
+      : `<ul class="list shop">${all.map(shopRow).join('')}</ul>`)
       : `<div class="empty"><div class="empty-icon">🛒</div><h3>Nothing to buy</h3><p>Items you finish are added here automatically.</p></div>`}`;
 }
 function bindShopping() {
+  $<HTMLSelectElement>('#shop-col')?.addEventListener('change', e => { S.shopCol = (e.target as HTMLSelectElement).value; render(); });
   $('#add-shop').onsubmit = async e => {
     e.preventDefault(); const v = $<HTMLInputElement>('#shop-in').value.trim(); if (!v) return;
-    const si: ShopItem = { id: db.uid(), name: v, done: false, addedAt: Date.now() };
+    const si: ShopItem = { id: db.uid(), name: v, done: false, addedAt: Date.now(), collectionId: S.shopCol === 'all' ? db.REGULAR_ID : S.shopCol };
     await db.put('shopping', si); S.shop.push(si); render(); $<HTMLInputElement>('#shop-in').focus();
   };
   document.querySelectorAll<HTMLElement>('[data-sid]').forEach(li => li.onclick = async e => {
@@ -1176,7 +1300,7 @@ function bindShopping() {
     const si = S.shop.find(x => x.id === li.dataset.sid)!; si.done = !si.done; await db.put('shopping', si); render();
   });
   document.querySelectorAll<HTMLElement>('[data-rm]').forEach(b => b.onclick = async () => { await db.del('shopping', b.dataset.rm!); S.shop = S.shop.filter(x => x.id !== b.dataset.rm); render(); });
-  $('#clear-done')?.addEventListener('click', async () => { for (const s of S.shop.filter(x => x.done)) await db.del('shopping', s.id); S.shop = S.shop.filter(x => !x.done); render(); });
+  $('#clear-done')?.addEventListener('click', async () => { const gone = S.shop.filter(x => x.done && (S.shopCol === 'all' || colId(x) === S.shopCol)); for (const s of gone) await db.del('shopping', s.id); S.shop = S.shop.filter(x => !gone.includes(x)); render(); });
 }
 
 // ---------- stats ----------
