@@ -298,3 +298,4 @@ button.card:active { background: var(--surface-2); }
 .item.flash { animation: flash 2s ease; }
 @keyframes flash { 0%, 40% { background: color-mix(in srgb, var(--accent) 25%, var(--surface)); } 100% { background: var(--surface); } }
 .shop-group { margin-bottom: 12px; }
+.dup-btn { width: 100%; margin: -6px 0 16px; }

@@ -285,14 +285,6 @@ function flash(sel: string) {
   el.scrollIntoView({ block: 'center' });
   el.classList.add('flash'); setTimeout(() => el.classList.remove('flash'), 2200);
 }
-/** Show one item in the List view: clear filters that hide it, open its category, scroll to it and highlight it. */
-function jumpToItem(id: string) {
-  const it = S.items.find(i => i.id === id); if (!it) return;
-  S.tab = 'items'; S.q = ''; S.view = 'list'; S.cat = 'all'; S.loc = 'all'; S.status = 'all';
-  if (S.col !== 'all' && colId(it) !== S.col) S.col = 'all';
-  expandedCats.add(catKey(it.categoryId));
-  render(); flash(`.item[data-id="${id}"]`);
-}
 function jumpToShop(id: string) {
   const si = S.shop.find(s => s.id === id); if (!si) return;
   S.tab = 'shopping'; S.q = '';
@@ -544,7 +536,7 @@ function bindResults() {
     if (selecting) { if (selected.has(id)) selected.delete(id); else selected.add(id); paintSelection(); return; }
     editItem(S.items.find(i => i.id === id)!);
   });
-  document.querySelectorAll<HTMLElement>('[data-jump-item]').forEach(li => li.onclick = () => jumpToItem(li.dataset.jumpItem!));
+  document.querySelectorAll<HTMLElement>('[data-jump-item]').forEach(li => li.onclick = () => { const it = S.items.find(i => i.id === li.dataset.jumpItem); if (it) editItem(it); });
   document.querySelectorAll<HTMLElement>('[data-jump-shop]').forEach(li => li.onclick = () => jumpToShop(li.dataset.jumpShop!));
 }
 
@@ -878,13 +870,14 @@ function openCategorySheet(selectedId: string, onPick: (id: string) => void) {
 }
 
 // ---------- item editor ----------
-function editItem(existing: Item | null, prefill: Partial<Item> = {}, autoCat = false, nextAdd: 'barcode' | 'menu' | null = null) {
+function editItem(existing: Item | null, prefill: Partial<Item> = {}, autoCat = false, nextAdd: 'barcode' | 'menu' | 'none' | null = null) {
   const it: Item = existing ? { ...existing } : { ...blank(), ...prefill };
   let catTouched = !!existing || (!!prefill.categoryId && !autoCat);
   let dirty = false;
   const markDirty = () => { dirty = true; };
   const s = sheet(`
-    ${existing ? `<div class="finish"><button class="btn used" id="e-used">✅ Used it</button><button class="btn binned" id="e-binned">🗑️ Binned it</button></div>` : ''}
+    ${existing ? `<div class="finish"><button class="btn used" id="e-used">✅ Used it</button><button class="btn binned" id="e-binned">🗑️ Binned it</button></div>
+      <button type="button" class="btn tonal dup-btn" id="e-dup">⧉ Duplicate</button>` : ''}
     <label class="field"><span>Name</span><input id="e-name" value="${esc(it.name)}" placeholder="e.g. Greek yoghurt" autocomplete="off"></label>
     <div class="field"><span>Expiry date</span>
       <div class="date-row"><input id="e-exp" type="date" value="${it.noExpiry || it.expiryStatus === 'reading' || it.expiryStatus === 'failed' ? '' : (it.expiry ?? '')}" ${it.noExpiry ? 'disabled' : ''}><button class="btn tonal" id="e-scan">📷 Scan</button><button type="button" class="btn ghost" id="e-clear">Clear</button></div>
@@ -1041,17 +1034,30 @@ function editItem(existing: Item | null, prefill: Partial<Item> = {}, autoCat = 
     const ev: WasteEvent = { id: db.uid(), itemId: existing!.id, name: existing!.name, categoryId: existing!.categoryId, collectionId: colId(S.items.find(x => x.id === existing!.id) ?? existing!), boughtAt: db.boughtTime(existing!), type, at: Date.now(), unitPrice: existing!.price, quantity: 1 };
     await db.put('events', ev); S.events.push(ev);
     const cur = { ...(S.items.find(x => x.id === existing!.id) ?? existing!) };
-    if (cur.quantity > 1) { cur.quantity--; await saveItem(cur); toast(`${type === 'used' ? 'Used' : 'Binned'} one. ${cur.quantity} left.`); }
-    else {
-      cur.status = type; cur.finishedAt = Date.now(); await cancelExpiryJobs(cur.id); await saveItem(cur);
-      if (!S.shop.some(x => !x.done && x.name.toLowerCase() === cur.name.toLowerCase() && colId(x) === colId(cur))) {
-        const si: ShopItem = { id: db.uid(), name: cur.name, done: false, addedAt: Date.now(), fromItemId: cur.id, collectionId: colId(cur) };
-        await db.put('shopping', si); S.shop.push(si);
-      }
-      toast(`${cur.name} added to your shopping list`);
+    const partial = cur.quantity > 1;
+    if (partial) { cur.quantity--; await saveItem(cur); }
+    else { cur.status = type; cur.finishedAt = Date.now(); await cancelExpiryJobs(cur.id); await saveItem(cur); }
+    // Every used/binned one goes on the shopping list under the item's collection; an open entry is kept as it is.
+    const onList = S.shop.some(x => !x.done && colId(x) === colId(cur) && (x.fromItemId === cur.id || x.name.toLowerCase() === cur.name.toLowerCase()));
+    if (!onList) {
+      const si: ShopItem = { id: db.uid(), name: cur.name, done: false, addedAt: Date.now(), fromItemId: cur.id, collectionId: colId(cur) };
+      await db.put('shopping', si); S.shop.push(si);
     }
+    const what = `${type === 'used' ? 'Used' : 'Binned'} one`;
+    toast(partial ? `${what}. ${cur.quantity} left · ${onList ? 'already on' : 'added to'} your shopping list` : `${cur.name} ${onList ? 'is on' : 'added to'} your shopping list`);
     s.close(); render();
   };
+  // Duplicate: a new item with the same details (quantity 1), opened so he can change it before saving.
+  $('#e-dup', el)?.addEventListener('click', async () => {
+    if (!(await s.requestClose())) return;
+    const src = S.items.find(x => x.id === existing!.id) ?? existing!;
+    const final = !src.noExpiry && src.expiry && !src.expiryStatus;
+    editItem(null, {
+      name: src.name, brand: src.brand, image: src.image, barcode: src.barcode, categoryId: src.categoryId, collectionId: colId(src),
+      location: src.location, unit: src.unit, price: src.price, boughtOn: src.boughtOn, quantity: 1,
+      noExpiry: src.noExpiry, expiry: final ? src.expiry : undefined, expiryMonthOnly: final ? src.expiryMonthOnly : undefined,
+    }, false, 'none');
+  });
   $('#e-used', el)?.addEventListener('click', () => finish('used'));
   $('#e-binned', el)?.addEventListener('click', () => finish('binned'));
   if (!existing && !it.name) setTimeout(() => $<HTMLInputElement>('#e-name', el).focus(), 300);
@@ -1085,7 +1091,7 @@ async function cancelExpiryJobs(itemId: string) {
   for (const j of (await db.getAll<db.ExpiryJob>('expiryJobs')).filter(j => j.itemId === itemId)) await db.del('expiryJobs', j.id);
 }
 
-async function afterNewItem(item: Item, nextAdd: 'barcode' | 'menu' | null, alreadyScanning: boolean) {
+async function afterNewItem(item: Item, nextAdd: 'barcode' | 'menu' | 'none' | null, alreadyScanning: boolean) {
   render();
   if (alreadyScanning) {
     toast('Reading date… you can add another item');

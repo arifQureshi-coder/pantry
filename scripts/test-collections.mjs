@@ -351,6 +351,27 @@ check(m.purchases.some(p => /Tim Tams/.test(p.name)), 'bulk delete keeps spend h
 // ---------- 10. Shopping list by collection ----------
 await page.locator('[data-view=list]').click(); await page.waitForSelector('.cat-group');
 await expandAll();
+const shopRows = () => page.evaluate(() => new Promise(res => { const r = indexedDB.open('pantry'); r.onsuccess = () => { const q = r.result.transaction('shopping').objectStore('shopping').getAll(); q.onsuccess = () => { r.result.close(); res(q.result); }; }; }));
+// Duplicate: same details, quantity 1, opened as a new item
+await page.locator('.item', { hasText: 'Chicken Thighs' }).click();
+await page.locator('#e-dup').click();
+await page.waitForFunction(() => document.querySelectorAll('.sheet-wrap').length === 1 && document.querySelector('.sheet-wrap.open .sheet-title')?.textContent === 'New item');
+check(/Chicken Thighs/.test(await page.locator('#e-name').inputValue()) && await page.locator('#e-qty').inputValue() === '1' && await page.locator('#e-price').inputValue() === '8.5', 'Duplicate opens a new item with the same details and quantity 1');
+await page.locator('#e-save').click(); await closed();
+m = await readDb();
+check(m.items.filter(i => /Chicken Thighs/.test(i.name) && i.status === 'active').length === 2, 'Duplicate created a second item');
+await expandAll();
+// Used one of three: goes on the shopping list now, under its collection, and isn't added twice
+await page.locator('.item', { hasText: 'Diced Tomatoes' }).click();
+await page.locator('#e-used').click(); await closed();
+let sw = (await shopRows()).filter(x => /Diced Tomatoes/.test(x.name));
+check(sw.length === 1 && sw[0].collectionId === 'regular', 'using 1 of 3 adds it to the shopping list under its collection', JSON.stringify(sw));
+await expandAll();
+await page.locator('.item', { hasText: 'Diced Tomatoes' }).click();
+await page.locator('#e-binned').click(); await closed();
+sw = (await shopRows()).filter(x => /Diced Tomatoes/.test(x.name));
+check(sw.length === 1, 'binning another keeps the one open entry (no duplicate)', String(sw.length));
+await expandAll();
 await page.locator('.item', { hasText: 'Frozen Prawns' }).click();
 await page.locator('#e-used').click();
 await closed();
@@ -383,8 +404,9 @@ check(shopHit.length === 1 && /Shopping list · Guests/.test(shopHit[0]), 'searc
 await page.locator('#q').fill('sparkling');
 check(await page.locator('[data-jump-item]').count() === 1, 'search finds items in other collections than the one picked');
 await page.locator('[data-jump-item]').click();
-await page.waitForSelector('.item.flash');
-check(await page.locator('#col-filter').inputValue() === 'all' && /Sparkling/.test(await page.locator('.item.flash').innerText()), 'tapping a result opens the List at that item and highlights it');
+await page.waitForSelector('.sheet-wrap.open #e-name');
+check(/Sparkling/.test(await page.locator('#e-name').inputValue()), 'tapping a pantry result opens that item\'s editor');
+await page.locator('.sheet-back').click(); await closed();
 await page.locator('#q').fill('napkin');
 await page.locator('[data-jump-shop]').click();
 await page.waitForSelector('[data-sid].flash');
