@@ -15,6 +15,7 @@ export interface Item {
   expiryMonthOnly?: boolean;
   expiryStatus?: 'reading' | 'pending' | 'failed'; // undefined = confirmed (or no date)
   expiryRaw?: string;    // text the scanner read, until the date is confirmed
+  expiryMethod?: 'ocr' | 'ai'; // how the pending/failed date was read
   noExpiry?: boolean;    // explicitly does not expire (not the same as a missing date)
   opened?: string;       // yyyy-mm-dd
   price?: number;        // unit price in AUD
@@ -41,6 +42,7 @@ export interface Settings {
   lastNotified?: string;   // yyyy-mm-dd, avoid repeat notifications on the same day
   view?: 'grouped' | 'list' | 'grid'; // old (v8) setting, no longer read
   homeView?: 'grid' | 'list';
+  useAiScan?: boolean;  // default true; when false, expiry photos never call Gemini
 }
 
 /** boughtAt: when the groceries were bought (item's bought-on date, else when it was added). Stats periods use it. */

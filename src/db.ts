@@ -76,7 +76,7 @@ export interface ExpiryJob { id: string; itemId: string; photo: Blob; addedAt: n
 
 export const DEFAULT_SETTINGS: Settings = {
   provider: 'gemini', geminiKey: '', geminiModel: 'gemini-3.6-flash',
-  openaiKey: '', openaiModel: 'gpt-4o-mini', leadDays: 3, homeView: 'grid',
+  openaiKey: '', openaiModel: 'gpt-4o-mini', leadDays: 3, homeView: 'grid', useAiScan: true,
 };
 export async function getSettings(): Promise<Settings> {
   const row = await req((await store('kv')).get('settings')) as { key: string; value: Settings } | undefined;

@@ -8,7 +8,8 @@
     "build": "tsc --noEmit && vite build",
     "preview": "vite preview --host",
     "test:dates": "node --experimental-strip-types scripts/test-dates.ts",
-    "test:receipt": "node --experimental-strip-types scripts/test-receipt-date.ts"
+    "test:receipt": "node --experimental-strip-types scripts/test-receipt-date.ts",
+    "test:ocr": "node scripts/test-ocr.mjs"
   },
   "devDependencies": {
     "typescript": "^7.0.2",

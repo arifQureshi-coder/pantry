@@ -67,9 +67,3 @@ function cameraError(err: any) {
   return 'Could not start the camera.';
 }
 
-/** Offline OCR fallback when there is no AI key. Loads Tesseract on demand. */
-export async function ocrText(img: Blob): Promise<string> {
-  const { recognize } = await import('tesseract.js');
-  const r = await recognize(img, 'eng');
-  return r.data.text;
-}

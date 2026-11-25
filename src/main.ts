@@ -5,6 +5,7 @@ import { guessCategory, defaultLocation, ICON_CHOICES } from './categories';
 import { daysUntil, formatDate, parseExpiry } from './dates';
 import { lookupBarcode } from './off';
 import { askAI, extractReceipt, readExpiry, suggestCategory, fileToJpeg, hasKey } from './ai';
+import { ocrExpiry } from './ocr';
 // Camera/barcode code (~400 KB) is loaded only when first needed.
 const scanner = () => import('./scanner');
 
@@ -1127,19 +1128,26 @@ function offerScanExpiry(item: Item): Promise<'scanned' | 'skip' | 'done'> {
   });
 }
 
-async function readExpiryPhoto(blob: Blob): Promise<{ iso: string | null; monthOnly: boolean; raw: string }> {
-  let iso: string | null = null, monthOnly = false, raw = '';
-  if (hasKey(S.settings)) {
-    const r = await readExpiry(S.settings, await fileToJpeg(blob, 1280));
-    raw = r.raw;
-    // Prefer our deterministic DD/MM parser on the text the AI saw; fall back to the AI's own date.
-    const p = parseExpiry(r.raw);
-    if (p) { iso = p.iso; monthOnly = p.monthOnly; } else if (r.date) { iso = r.date; monthOnly = r.monthOnly; }
-  } else {
-    raw = (await (await scanner()).ocrText(blob)).replace(/\s+/g, ' ').trim();
-    const p = parseExpiry(raw); if (p) { iso = p.iso; monthOnly = p.monthOnly; raw = p.raw; }
+async function readExpiryPhoto(blob: Blob): Promise<{ iso: string | null; monthOnly: boolean; raw: string; method?: 'ocr' | 'ai' }> {
+  // 1. On-device OCR + deterministic parser.
+  let raw = '';
+  try {
+    const o = await ocrExpiry(blob);
+    raw = o.raw || o.text;
+    if (o.iso) return { iso: o.iso, monthOnly: o.monthOnly, raw: o.raw, method: 'ocr' };
+  } catch (e) {
+    raw = String((e as Error)?.message ?? '');
   }
-  return { iso, monthOnly, raw };
+  // 2. AI only if no confident date, the toggle is on, and a key is set. Receipts are unchanged.
+  const aiOn = S.settings.useAiScan !== false;
+  if (aiOn && hasKey(S.settings)) {
+    const r = await readExpiry(S.settings, await fileToJpeg(blob, 1280));
+    const p = parseExpiry(r.raw);
+    if (p) return { iso: p.iso, monthOnly: p.monthOnly, raw: p.raw, method: 'ai' };
+    if (r.date) return { iso: r.date, monthOnly: r.monthOnly, raw: r.raw || raw, method: 'ai' };
+    raw = r.raw || raw;
+  }
+  return { iso: null, monthOnly: false, raw, method: 'ocr' };
 }
 function isTransient(e: unknown) {
   if ([408, 429, 500, 502, 503, 504].includes((e as any)?.status)) return true;
@@ -1169,8 +1177,8 @@ async function runExpiryJob(job: db.ExpiryJob) {
     const r = await readExpiryPhoto(job.photo);
     const cur = still();
     if (!cur) { await db.del('expiryJobs', job.id); return; }
-    if (r.iso) { cur.expiry = r.iso; cur.expiryMonthOnly = r.monthOnly; cur.expiryRaw = r.raw || undefined; cur.expiryStatus = 'pending'; }
-    else { cur.expiry = undefined; cur.expiryMonthOnly = undefined; cur.expiryRaw = r.raw || undefined; cur.expiryStatus = 'failed'; }
+    if (r.iso) { cur.expiry = r.iso; cur.expiryMonthOnly = r.monthOnly; cur.expiryRaw = r.raw || undefined; cur.expiryStatus = 'pending'; cur.expiryMethod = r.method; }
+    else { cur.expiry = undefined; cur.expiryMonthOnly = undefined; cur.expiryRaw = r.raw || undefined; cur.expiryStatus = 'failed'; cur.expiryMethod = r.method; }
     await saveItem(cur);
     await db.del('expiryJobs', job.id);
     render();
@@ -1207,7 +1215,7 @@ function openDatesSheet() {
   };
   const apply = async (id: string, iso: string, monthOnly: boolean) => {
     const it = S.items.find(x => x.id === id); if (!it) return;
-    it.expiry = iso; it.expiryMonthOnly = monthOnly; it.expiryStatus = undefined; it.expiryRaw = undefined;
+    it.expiry = iso; it.expiryMonthOnly = monthOnly; it.expiryStatus = undefined; it.expiryRaw = undefined; it.expiryMethod = undefined;
     await saveItem(it); render(); paint();
   };
   const bind = () => {
@@ -1256,7 +1264,7 @@ function datesSheetHtml() {
         <div class="meta">
           <div class="name">${esc(i.name)}</div>
           <div class="sub">${ok ? prettyDate(i.expiry!, i.expiryMonthOnly) : "Couldn't read a date"}</div>
-          ${i.expiryRaw ? `<div class="sub">Read: “${esc(i.expiryRaw.slice(0, 80))}”</div>` : ''}
+          ${i.expiryRaw ? `<div class="sub">Read: “${esc(i.expiryRaw.slice(0, 80))}”</div>` : ''}${i.expiryMethod ? `<div class="sub">${i.expiryMethod === 'ai' ? 'Read by AI' : 'Read on your phone'}</div>` : ''}
           <div class="edit-date" hidden><input type="date" value="${i.expiry ?? ''}"><button class="btn tonal" data-use="${i.id}">Use date</button></div>
           <div class="date-actions">
             ${ok ? `<button class="btn primary" data-confirm="${i.id}">Confirm</button>` : ''}
@@ -1445,6 +1453,8 @@ function settingsView() {
         <label class="field"><span>Model</span><input id="s-model" value="${esc(st.openaiModel)}"></label>`}
       <p class="note">🔒 Your key is saved only on this phone. It is sent only to ${g ? 'Google' : 'OpenAI'} when you scan, and is never included in backups.</p>
       <button class="btn tonal" id="s-test">Test key</button>
+      <label class="toggle"><input type="checkbox" id="s-ai-scan" ${st.useAiScan !== false ? 'checked' : ''}> Use AI for scanning</label>
+      <p class="muted">Expiry photos are read on your phone first (works offline after the first scan). If no date is found and this is on, your AI key is used as a backup. Receipts still use AI.</p>
     </section>
     <section class="panel"><h3>Reminders</h3>
       <label class="field"><span>Warn me this many days before expiry</span><div class="stepper"><button data-d="-1">−</button><input id="s-days" type="number" min="0" max="30" value="${st.leadDays}"><button data-d="1">＋</button></div></label>
@@ -1476,6 +1486,7 @@ function bindSettings() {
   document.querySelectorAll<HTMLElement>('[data-p]').forEach(b => b.onclick = async () => { st.provider = b.dataset.p as any; await save(); render(); });
   $<HTMLInputElement>('#s-key').addEventListener('change', async e => { const v = (e.target as HTMLInputElement).value.trim(); if (st.provider === 'gemini') st.geminiKey = v; else st.openaiKey = v; await save(); toast('Key saved on this phone'); });
   $<HTMLInputElement>('#s-model').addEventListener('change', async e => { const v = (e.target as HTMLInputElement).value.trim(); if (st.provider === 'gemini') st.geminiModel = v; else st.openaiModel = v || 'gpt-4o-mini'; await save(); });
+  $('#s-ai-scan')?.addEventListener('change', async e => { st.useAiScan = (e.target as HTMLInputElement).checked; await save(); toast(st.useAiScan ? 'AI backup for expiry scans is on' : 'Expiry scans stay on your phone'); });
   $('#s-test').onclick = async () => {
     const k = $<HTMLInputElement>('#s-key').value.trim(); if (st.provider === 'gemini') st.geminiKey = k; else st.openaiKey = k; await save();
     const done = busy('Testing…');

@@ -7,6 +7,7 @@ export interface ParsedDate {
   monthOnly: boolean;   // e.g. "BB 03/26" or "MAR 2026"
   raw: string;          // the text fragment that matched
   keyword: boolean;     // preceded by BB / USE BY / EXP etc.
+  packed?: boolean;     // preceded by Packed on / MFG etc. — not an expiry
 }
 
 const MONTHS: Record<string, number> = {
@@ -15,6 +16,8 @@ const MONTHS: Record<string, number> = {
 };
 const MON = '(JANUARY|FEBRUARY|MARCH|APRIL|JUNE|JULY|AUGUST|SEPTEMBER|OCTOBER|NOVEMBER|DECEMBER|JAN|FEB|MAR|APR|MAY|JUN|JUL|AUG|SEPT|SEP|OCT|NOV|DEC)';
 const KEYWORDS = /(BEST\s*BEFORE(\s*END)?|BB[E]?|B\/B|USE\s*BY|USE\s*BEFORE|EXP(IRY|IRES|\.)?(\s*DATE)?|EXD|BEST\s*BY|BBD|SELL\s*BY|DISPLAY\s*UNTIL)\s*[:.\-]?\s*$/;
+/** Dates next to these are pack/manufacture dates, not expiry. */
+const PACKED = /(PACK(ED)?(\s*ON)?|PKD|MFG|MFD|MANUFACTURED|PROD(UCT(ION)?)?(\s*DATE)?|PACK\s*DATE)\s*[:.\-]?\s*$/;
 
 const pad = (n: number) => String(n).padStart(2, '0');
 const lastDay = (y: number, m: number) => new Date(y, m, 0).getDate();
@@ -32,12 +35,26 @@ function inferYear(m: number, d: number, today: Date) {
   return (today.getTime() - cand.getTime()) / 864e5 > 60 ? y + 1 : y;
 }
 
-/** Fix common OCR confusions inside numeric-ish tokens (O→0, I/l→1, S→5, B→8 only between digits). */
+/** Fix common OCR confusions inside numeric tokens (O→0, I/l→1, S→5, B→8). Letters in words are left alone. */
 function normalise(text: string) {
   let t = text.toUpperCase().replace(/[‐-―]/g, '-').replace(/\s+/g, ' ');
-  t = t.replace(/(?<=\d)[O](?=\d)|(?<=[\/.\-])O(?=\d)|(?<=\d)O(?=[\/.\-])/g, '0');
-  t = t.replace(/(?<=\d)[IL|](?=\d)|(?<=[\/.\-])[IL|](?=\d)|(?<=\d)[IL|](?=[\/.\-])/g, '1');
+  const swap = (ch: string, d: string) => {
+    t = t.replace(new RegExp(`(?<=\\d)${ch}(?=\\d)|(?<=[\\/.\\-\\s])${ch}(?=\\d)|(?<=\\d)${ch}(?=[\\/.\\-])|(?<![A-Z0-9])${ch}(?=\\d)`, 'g'), d);
+  };
+  swap('O', '0');
+  swap('[IL|]', '1');
+  swap('S', '5');
+  swap('B', '8');
   return t;
+}
+
+/** Reject dates more than 1 year in the past or more than 10 years ahead. */
+export function isPlausibleDate(y: number, m: number, d: number, today = new Date()) {
+  if (!valid(y, m, d)) return false;
+  const dt = new Date(y, m - 1, d).getTime();
+  const lo = new Date(today.getFullYear() - 1, today.getMonth(), today.getDate()).getTime();
+  const hi = new Date(today.getFullYear() + 10, today.getMonth(), today.getDate()).getTime();
+  return dt >= lo && dt <= hi;
 }
 
 export function parseAllDates(input: string, today = new Date()): ParsedDate[] {
@@ -52,9 +69,13 @@ export function parseAllDates(input: string, today = new Date()): ParsedDate[] {
     const monthOnly = d === null;
     const day = d ?? lastDay(y, mo);
     if (!valid(y, mo, day)) return;
+    // A real date that's too old or too far ahead still consumes the match, so a shorter
+    // re-parse of the same digits (e.g. 01/01 from 01/01/20) cannot sneak through.
+    if (!isPlausibleDate(y, mo, day, today)) { taken.push([s, e]); return; }
     taken.push([s, e]);
-    const before = text.slice(Math.max(0, s - 20), s);
-    out.push({ iso: toISO(y, mo, day), monthOnly, raw: m[0].trim(), keyword: KEYWORDS.test(before) });
+    const before = text.slice(Math.max(0, s - 24), s);
+    const packed = PACKED.test(before);
+    out.push({ iso: toISO(y, mo, day), monthOnly, raw: m[0].trim(), keyword: !packed && KEYWORDS.test(before), packed });
   };
   const run = (re: RegExp, fn: (m: RegExpExecArray) => void) => {
     let m: RegExpExecArray | null;
@@ -93,9 +114,10 @@ export function parseAllDates(input: string, today = new Date()): ParsedDate[] {
   return out;
 }
 
-/** Pick the most likely expiry date: keyword-tagged first, then latest date (pack dates come earlier). */
+/** Pick the most likely expiry date: ignore labelled pack dates, prefer a date next to an expiry keyword, else the latest plausible one. */
 export function parseExpiry(input: string, today = new Date()): ParsedDate | null {
-  const all = parseAllDates(input, today);
+  const found = parseAllDates(input, today);
+  const all = found.some(d => !d.packed) ? found.filter(d => !d.packed) : [];
   if (!all.length) return null;
   const pool = all.some(d => d.keyword) ? all.filter(d => d.keyword) : all;
   return pool.slice().sort((a, b) => (a.iso < b.iso ? 1 : -1))[0];
