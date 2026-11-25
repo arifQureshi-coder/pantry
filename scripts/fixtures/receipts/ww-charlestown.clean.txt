@@ -1,0 +1,13 @@
+Woolworths
+The fresh food people
+Charlestown
+TAX INVOICE
+ABN 88 000 014 675
+MILK 2L                           3.20
+BREAD 700G                        2.80
+CHICKEN BREAST 1KG               14.00
+BANANAS                           4.00
+  0.800 kg @ $5.00/kg
+12/04/2026 16:10
+SUBTOTAL                        173.00
+TOTAL                           173.00

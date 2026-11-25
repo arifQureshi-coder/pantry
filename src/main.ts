@@ -6,7 +6,7 @@ import { daysUntil, formatDate, parseExpiry } from './dates';
 import { lookupBarcode } from './off';
 import { askAI, extractReceipt, readExpiry, suggestCategory, suggestCategories, fileToJpeg, hasKey } from './ai';
 import { ocrExpiry, ocrReceiptPhotos } from './ocr';
-import { joinReceiptTexts, parseReceiptText, receiptTotalCheck, shouldFallbackToAi } from './receipt';
+import { parseReceiptParts, receiptTotalCheck, shouldFallbackToAi } from './receipt';
 // Camera/barcode code (~400 KB) is loaded only when first needed.
 const scanner = () => import('./scanner');
 
@@ -676,7 +676,7 @@ async function receiptFlow() {
   let warning = '';
   try {
     const learned = await db.getReceiptCats();
-    const ocr = parseReceiptText(joinReceiptTexts(await ocrReceiptPhotos(parts)), S.cats, learned);
+    const ocr = parseReceiptParts(await ocrReceiptPhotos(parts), S.cats, learned);
     lines = ocr.lines; date = ocr.date; warning = ocr.warning ?? '';
     const aiOn = S.settings.useAiScan !== false;
     if (shouldFallbackToAi(ocr, aiOn, hasKey(S.settings))) {

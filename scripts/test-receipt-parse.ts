@@ -1,8 +1,12 @@
+import { readFileSync } from 'node:fs';
+import { resolve } from 'node:path';
 import {
-  detectStore, expandAbbrev, joinReceiptTexts, parseMoneyOcr, parseReceiptText,
+  detectStore, expandAbbrev, joinReceiptTexts, parseMoneyOcr, parseReceiptText, parseReceiptParts,
   receiptPurchaseDate, receiptTotalCheck, shouldFallbackToAi, categorizeReceiptName,
 } from '../src/receipt.ts';
 import { PRESET_CATEGORIES } from '../src/categories.ts';
+
+const fx = (name: string) => readFileSync(resolve('scripts/fixtures/receipts', name), 'utf8');
 
 const today = new Date(2026, 10, 16); // 16 Nov 2026
 const cats = PRESET_CATEGORIES;
@@ -179,6 +183,86 @@ check(!shouldFallbackToAi(none, true, false), 'no key: never fall back');
 check(shouldFallbackToAi(thin, true, true), 'fallback when OCR finds fewer than 2 items and toggle is on');
 check(shouldFallbackToAi(none, true, true), 'fallback when OCR finds no items and toggle is on');
 check(shouldFallbackToAi(off, true, true), 'fallback when total check fails and toggle is on');
+
+
+// --- real Woolworths Merrylands layout (clean transcription) ---
+const wwM = parseReceiptText(fx('ww-merrylands.clean.txt'), cats, {}, today);
+const wwMlist = wwM.lines.map(l => `${l.name} x${l.quantity} $${l.price}`).join(' | ');
+check(wwM.store === 'woolworths', 'WW Merrylands store');
+check(wwM.lines.length === 11, `WW Merrylands has 11 item lines, got ${wwM.lines.length}`, wwMlist);
+const bund = wwM.lines.find(l => /Bundaberg Sarsaparilla/i.test(l.name));
+check(!!bund && !/#/.test(bund!.name) && bund!.quantity === 2 && bund!.price === 11.5, 'WW # prefix stripped, Bundaberg 2 @ 5.75 = 11.50', `${bund?.name} x${bund?.quantity} $${bund?.price}`);
+const bag = wwM.lines.find(l => /Paper Bag/i.test(l.name));
+check(bag?.quantity === 2 && bag?.price === 0.5, 'WW paper bags 2 @ 0.25 = 0.50', `${bag?.quantity} ${bag?.price}`);
+const pasta = wwM.lines.find(l => /San Remo/i.test(l.name));
+check(pasta?.price === 2.95, 'WW San Remo penne 2.95', String(pasta?.price));
+const garlic = wwM.lines.find(l => /Garlic Paste/i.test(l.name));
+const italian = wwM.lines.find(l => /Herb Tube Italian/i.test(l.name));
+const chilli = wwM.lines.find(l => /Chilli Mild/i.test(l.name));
+check(garlic?.quantity === 2 && garlic?.price === 6, 'WW garlic 2 @ 4.00 shares ANY 2 for $6 (net 6.00)', `${garlic?.quantity} ${garlic?.price}`);
+check(italian?.price === 3 && chilli?.price === 3, 'WW Italian + Chilli net $3 each after multibuy', `${italian?.price} ${chilli?.price}`);
+const jelly = wwM.lines.find(l => /Jelly Beans/i.test(l.name));
+check(jelly?.price === 5 && !/#/.test(jelly?.name ?? ''), 'WW Allens Jelly Beans is $5, not in the herb-tube deal', String(jelly?.price));
+const turk = wwM.lines.find(l => /Turkey Mince/i.test(l.name));
+check(turk?.quantity === 2 && turk?.price === 12, 'WW Ingham Turkey OFFER -$2 off 14.00 → 12.00', `${turk?.quantity} ${turk?.price}`);
+const party = wwM.lines.find(l => /Party Mix/i.test(l.name));
+check(party?.quantity === 2 && party?.price === 28, 'WW Allens Party Mix 2 @ 14.00 = 28.00', `${party?.quantity} ${party?.price}`);
+const caramel = wwM.lines.find(l => /Caramel/i.test(l.name));
+check(!!caramel && /Nut Salted/i.test(caramel!.name), 'WW CamelCase NutSalted → Nut Salted', caramel?.name);
+check(wwM.total === 85.95 && wwM.sum === 85.95 && wwM.totalOk, `WW Merrylands total checks out (sum ${wwM.sum} total ${wwM.total})`);
+check(wwM.date === '2025-05-18', 'WW Merrylands purchase date 18/05/2025', String(wwM.date));
+check(!wwM.lines.some(l => /subtotal|total/i.test(l.name)), 'WW Merrylands skipped 16 SUBTOTAL / TOTAL');
+
+// --- Tesseract OCR text from the same photo (noise allowed) ---
+const wwOcr = parseReceiptText(fx('ww-merrylands.ocr.txt'), cats, {}, today);
+const wwOcrList = wwOcr.lines.map(l => `${l.name} x${l.quantity} $${l.price}`).join(' | ');
+check(wwOcr.store === 'woolworths', 'OCR WW still detected via "fresh food" header', wwOcr.store);
+check(wwOcr.lines.some(l => /Pasta|Penne/i.test(l.name)), 'OCR finds the pasta line', wwOcrList);
+check(wwOcr.lines.some(l => /Herb Tube/i.test(l.name)), 'OCR finds a Herb Tube line', wwOcrList);
+check(wwOcr.lines.some(l => /Turkey/i.test(l.name)), 'OCR finds the turkey line', wwOcrList);
+check(wwOcr.lines.some(l => /Kellogg/i.test(l.name)), 'OCR finds a Kellogg cereal line', wwOcrList);
+const turkO = wwOcr.lines.find(l => /Turkey/i.test(l.name) && !/OFFER/i.test(l.name));
+check(turkO?.price === 12, 'OCR applies Ingham Turkey OFFER -2.00 to the mince line', `${turkO?.price} // ${wwOcrList}`);
+check(wwOcr.total === 85.95, 'OCR prefers SUBTOTAL $85.95 over a garbled TOTAL 5.45', String(wwOcr.total));
+
+// --- Aldi layout: SKU, GST letter, Qty ea., abbreviations, surcharge, notes ---
+const aldiReal = parseReceiptText(fx('aldi.clean.txt'), cats, {}, today);
+const aldiList = aldiReal.lines.map(l => `${l.name} x${l.quantity} $${l.price}`).join(' | ');
+check(aldiReal.store === 'aldi', 'Aldi store from header');
+const coke = aldiReal.lines.find(l => /Coke Zero/i.test(l.name));
+check(coke?.quantity === 4 && coke?.price === 11.96 && !/366905/.test(coke?.name ?? ''), 'Aldi SKU stripped, Coke 4 @ 2.99 ea. = 11.96', `${coke?.name} x${coke?.quantity} $${coke?.price}`);
+const soy = aldiReal.lines.find(l => /Soy/i.test(l.name));
+check(!!soy && /Milk UHT Organic Soy/i.test(soy!.name), 'Aldi MilkUHTOrgSoy expands', soy?.name);
+const bread = aldiReal.lines.find(l => /Bread/i.test(l.name));
+check(!!bread && /Vitamin White Bread/i.test(bread!.name), 'Aldi VitmnWhtBread expands', bread?.name);
+const chs = aldiReal.lines.find(l => /Cheese|Chs/i.test(l.name));
+check(!!chs && /Cheese Slice/i.test(chs!.name), 'Aldi Chs Slc expands', chs?.name);
+check(!aldiReal.lines.some(l => /surcharge|card sales|84\.95|5x1|175g/i.test(l.name)), 'Aldi skips surcharge, card sales, and handwritten notes', aldiList);
+check(aldiReal.total === 63.48 && aldiReal.sum === 63.48 && aldiReal.totalOk, `Aldi Total (INCL GST) $63.48 checks out (sum ${aldiReal.sum})`);
+
+// --- Costco layout: code, uppercase name, 1x, price with & ---
+const costco = parseReceiptText(fx('costco.clean.txt'), cats, {}, today);
+const costcoList = costco.lines.map(l => `${l.name} x${l.quantity} $${l.price}`).join(' | ');
+check(costco.store === 'costco', 'Costco store from header');
+check(costco.lines.length === 3, `Costco has 3 items, got ${costco.lines.length}`, costcoList);
+const olives = costco.lines.find(l => /Kalamata Olives/i.test(l.name));
+check(olives?.quantity === 1 && olives?.price === 12.99, 'Costco 1x price with & marker', `${olives?.quantity} ${olives?.price}`);
+const roti = costco.lines.find(l => /Rotisserie Chicken/i.test(l.name));
+check(roti?.quantity === 1 && roti?.price === 8.99, 'Costco rotisserie chicken', `${roti?.quantity} ${roti?.price}`);
+const bake = costco.lines.find(l => /Take/i.test(l.name));
+check(!!bake && /Kirkland/i.test(bake!.name) && /Chicken/i.test(bake!.name) && bake!.quantity === 2 && bake!.price === 15.98,
+  'Costco KS TAKE & BAKE CHK expands, 2x 15.98', `${bake?.name} x${bake?.quantity} $${bake?.price}`);
+check(costco.total == null && costco.totalOk, 'Costco partial photo (no total) does not warn');
+check(!costco.lines.some(l => /eftpos|approved/i.test(l.name)), 'Costco skipped EFTPOS footer');
+
+// --- two receipts side by side: parse separately, do not mix columns ---
+const two = parseReceiptParts([fx('ww-charlestown.clean.txt'), fx('coles-charlestown.clean.txt')], cats, {}, today);
+check(/2 receipts/i.test(two.warning ?? '') && /Woolworths \$173/i.test(two.warning ?? '') && /Coles \$200/i.test(two.warning ?? ''),
+  'two-receipt photo warns with both totals', two.warning);
+check(two.total === 373, 'two-receipt combined printed total 173+200=373', String(two.total));
+check(two.lines.some(l => /Chicken Breast/i.test(l.name)) && two.lines.some(l => /Butter/i.test(l.name) || /Coles Butter/i.test(l.name)),
+  'two-receipt merge keeps items from both shops', two.lines.map(l => l.name).join(', '));
+check(two.date === '2026-04-12', 'two-receipt date 12/04/2026', String(two.date));
 
 console.log(fail ? `${fail} failed, ${pass} passed` : `${pass} passed`);
 process.exit(fail ? 1 : 0);

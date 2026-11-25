@@ -1,0 +1,27 @@
+ALDI
+TAX INVOICE
+366905 Coke Zero 1.5L            11.96 B
+  Qty 4 @ $2.99 ea.
+412210 MilkUHTOrgSoy 1L           2.49 A
+188002 VitmnWhtBread 700g         2.19 A
+220145 Chs Slc 500g               5.99 A
+330001 Baked Beans 420g           1.29 A
+330002 Baked Beans 420g           1.29 A
+441100 Rice 1kg                   1.99 A
+552200 Pasta 500g                 0.95 A
+663300 Eggs 12pk                  4.29 A
+774400 Bananas 1kg                3.48 A
+885500 Yoghurt 1kg                4.49 A
+996600 Chicken Breast 500g       7.99 A
+101101 Frozen Peas 1kg            1.89 A
+202202 Orange Juice 2L            2.79 A
+303303 Coffee 200g                5.91 A
+404404 Toilet Paper 8pk           4.49 B
+CREDIT SURCHARGE GST              0.30 A
+TOTAL SURCHARGE                   0.30
+Total (INCL GST)                 $63.48
+19 Items
+Card Sales
+5x1.25L
+175g
+$84.95

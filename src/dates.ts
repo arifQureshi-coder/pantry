@@ -49,15 +49,15 @@ function normalise(text: string) {
 }
 
 /** Reject dates more than 1 year in the past or more than 10 years ahead. */
-export function isPlausibleDate(y: number, m: number, d: number, today = new Date()) {
+export function isPlausibleDate(y: number, m: number, d: number, today = new Date(), pastYears = 1) {
   if (!valid(y, m, d)) return false;
   const dt = new Date(y, m - 1, d).getTime();
-  const lo = new Date(today.getFullYear() - 1, today.getMonth(), today.getDate()).getTime();
+  const lo = new Date(today.getFullYear() - pastYears, today.getMonth(), today.getDate()).getTime();
   const hi = new Date(today.getFullYear() + 10, today.getMonth(), today.getDate()).getTime();
   return dt >= lo && dt <= hi;
 }
 
-export function parseAllDates(input: string, today = new Date()): ParsedDate[] {
+export function parseAllDates(input: string, today = new Date(), pastYears = 1): ParsedDate[] {
   const text = normalise(input);
   const out: ParsedDate[] = [];
   const taken: Array<[number, number]> = [];
@@ -71,7 +71,7 @@ export function parseAllDates(input: string, today = new Date()): ParsedDate[] {
     if (!valid(y, mo, day)) return;
     // A real date that's too old or too far ahead still consumes the match, so a shorter
     // re-parse of the same digits (e.g. 01/01 from 01/01/20) cannot sneak through.
-    if (!isPlausibleDate(y, mo, day, today)) { taken.push([s, e]); return; }
+    if (!isPlausibleDate(y, mo, day, today, pastYears)) { taken.push([s, e]); return; }
     taken.push([s, e]);
     const before = text.slice(Math.max(0, s - 24), s);
     const packed = PACKED.test(before);
@@ -87,8 +87,10 @@ export function parseAllDates(input: string, today = new Date()): ParsedDate[] {
 
   // 1. ISO-ish: 2026-03-12, 2026/03/12, 2026.03.12
   run(new RegExp(`${B}(20\\d{2})${SEP}(\\d{1,2})${SEP}(\\d{1,2})${E}`, 'g'), m => push(m, +m[1], +m[2], +m[3]));
-  // 2. DD/MM/YYYY or DD/MM/YY (also . - and space separated)
-  run(new RegExp(`${B}(\\d{1,2})(?:${SEP}|\\s)(\\d{1,2})(?:${SEP}|\\s)(20\\d{2}|\\d{2})${E}`, 'g'), m => push(m, year4(+m[3]), +m[2], +m[1]));
+  // 2a. DD/MM/YYYY or DD/MM/YY with punctuation — don't grab "19:28 18/05" from a time + date.
+  run(new RegExp(`${B}(\\d{1,2})${SEP}(\\d{1,2})${SEP}(20\\d{2}|\\d{2})${E}`, 'g'), m => push(m, year4(+m[3]), +m[2], +m[1]));
+  // 2b. Space-separated DD MM YYYY
+  run(new RegExp(`${B}(\\d{1,2})\\s+(\\d{1,2})\\s+(20\\d{2}|\\d{2})${E}`, 'g'), m => push(m, year4(+m[3]), +m[2], +m[1]));
   // 3. DD MON YYYY / DD-MON-YY / 12MAR26 / 12 MAR
   run(new RegExp(`${B}(\\d{1,2})(?:ST|ND|RD|TH)?\\s*[\\/.\\-]?\\s*${MON}\\.?(?:\\s*[\\/.\\-,]?\\s*(20\\d{2}|\\d{2})${E})?`, 'g'), m => {
     const mo = MONTHS[m[2]]; const d = +m[1];
