@@ -4,8 +4,9 @@ import * as db from './db';
 import { guessCategory, defaultLocation, ICON_CHOICES } from './categories';
 import { daysUntil, formatDate, parseExpiry } from './dates';
 import { lookupBarcode } from './off';
-import { askAI, extractReceipt, readExpiry, suggestCategory, fileToJpeg, hasKey } from './ai';
-import { ocrExpiry } from './ocr';
+import { askAI, extractReceipt, readExpiry, suggestCategory, suggestCategories, fileToJpeg, hasKey } from './ai';
+import { ocrExpiry, ocrReceiptPhotos } from './ocr';
+import { joinReceiptTexts, parseReceiptText, receiptTotalCheck, shouldFallbackToAi } from './receipt';
 // Camera/barcode code (~400 KB) is loaded only when first needed.
 const scanner = () => import('./scanner');
 
@@ -664,25 +665,52 @@ function collectReceiptParts(initial: Blob[]): Promise<Blob[] | null> {
 }
 
 async function receiptFlow() {
-  if (!hasKey(S.settings)) { toast('Add your AI key in Settings to scan receipts'); S.tab = 'settings'; render(); return; }
   const first = await (await scanner()).capturePhoto('Scan receipt', 'Photograph the top of the receipt, flat and well lit. You can add more parts next.');
   if (!first) return;
   const parts = await collectReceiptParts([first]);
   if (!parts?.length) return;
   const done = busy(parts.length > 1 ? `Reading ${parts.length} receipt parts…` : 'Reading receipt…');
-  let read;
-  try { read = await extractReceipt(S.settings, await Promise.all(parts.map(b => fileToJpeg(b, 1600, 0.85))), S.cats); }
-  catch (e: any) { done(); return alert(e.message); }
+  let lines: { name: string; quantity: number; categoryId: string; price?: number }[] = [];
+  let date: string | null = null;
+  let method: 'ocr' | 'ai' = 'ocr';
+  let warning = '';
+  try {
+    const learned = await db.getReceiptCats();
+    const ocr = parseReceiptText(joinReceiptTexts(await ocrReceiptPhotos(parts)), S.cats, learned);
+    lines = ocr.lines; date = ocr.date; warning = ocr.warning ?? '';
+    const aiOn = S.settings.useAiScan !== false;
+    if (shouldFallbackToAi(ocr, aiOn, hasKey(S.settings))) {
+      const ai = await extractReceipt(S.settings, await Promise.all(parts.map(b => fileToJpeg(b, 1600, 0.85))), S.cats);
+      if (ai.lines.length >= 2 || ai.lines.length > ocr.lines.length) {
+        method = 'ai';
+        lines = ai.lines;
+        date = ai.date ?? ocr.date;
+        const sum = Math.round(lines.reduce((n, l) => n + (l.price ?? 0), 0) * 100) / 100;
+        warning = receiptTotalCheck(sum, ocr.total).warning ?? '';
+      }
+    } else if (aiOn && hasKey(S.settings)) {
+      const unknown = lines.filter(l => l.categoryId === 'other').map(l => l.name);
+      if (unknown.length) {
+        try {
+          const sug = await suggestCategories(S.settings, unknown, S.cats);
+          for (const l of lines) {
+            const id = sug[l.name.toLowerCase()];
+            if (l.categoryId === 'other' && id) l.categoryId = id;
+          }
+        } catch { /* keep keyword / Other */ }
+      }
+    }
+  } catch (e: any) { done(); return alert(e.message); }
   done();
-  const lines = read.lines;
   if (!lines.length) return toast('No items found on that receipt');
   const catOpts = (sel: string) => S.cats.map(c => `<option value="${c.id}" ${c.id === sel ? 'selected' : ''}>${c.icon} ${esc(c.name)}</option>`).join('')
     + (S.cats.some(c => c.id === 'other') ? '' : `<option value="other" ${sel === 'other' ? 'selected' : ''}>${FALLBACK_CAT.icon} ${FALLBACK_CAT.name}</option>`);
-  const s = sheet(`<div class="two">
+  const s = sheet(`${warning ? `<div class="warn-box"><p>${esc(warning)}</p></div>` : ''}
+    <div class="two">
       <div class="field"><span>Add to collection</span><select id="rv-col">${collectionOptions(db.REGULAR_ID)}</select></div>
-      <label class="field"><span>Bought on</span><input id="rv-date" type="date" value="${read.date ?? ''}" max="${todayISO()}"><small class="muted">${read.date ? 'Read from the receipt' : 'Optional'}</small></label>
+      <label class="field"><span>Bought on</span><input id="rv-date" type="date" value="${date ?? ''}" max="${todayISO()}"><small class="muted">${date ? 'Read from the receipt' : 'Optional'}</small></label>
     </div>
-    <p class="muted">Untick anything you don't want. Tap a name to edit it.</p>
+    <p class="muted">${method === 'ai' ? 'Read by AI' : 'Read on your phone'}. Untick anything you don't want. Tap a name to edit it.</p>
     <ul class="review">${lines.map((l, n) => `<li data-n="${n}">
       <input type="checkbox" checked aria-label="Include">
       <div class="rv-main"><input class="rv-name" value="${esc(l.name)}"><div class="rv-sub">
@@ -704,6 +732,7 @@ async function receiptFlow() {
       const price = linePrice != null ? Math.round(linePrice / quantity * 100) / 100 : undefined;
       const it: Item = { ...blank(), name, categoryId, location: defaultLocation(categoryId), quantity, price, collectionId, boughtOn };
       await saveItem(it);
+      void db.rememberReceiptCat(name, categoryId);
       if (price) await recordPurchase(it, quantity, price, purchaseTime(boughtOn), linePrice);
       n++;
     }
@@ -1454,7 +1483,7 @@ function settingsView() {
       <p class="note">🔒 Your key is saved only on this phone. It is sent only to ${g ? 'Google' : 'OpenAI'} when you scan, and is never included in backups.</p>
       <button class="btn tonal" id="s-test">Test key</button>
       <label class="toggle"><input type="checkbox" id="s-ai-scan" ${st.useAiScan !== false ? 'checked' : ''}> Use AI for scanning</label>
-      <p class="muted">Expiry photos are read on your phone first (works offline after the first scan). If no date is found and this is on, your AI key is used as a backup. Receipts still use AI.</p>
+      <p class="muted">Expiry photos and receipts are read on your phone first (works offline after the first scan). If a date can't be read, or a receipt looks incomplete, and this is on, your AI key is used as a backup.</p>
     </section>
     <section class="panel"><h3>Reminders</h3>
       <label class="field"><span>Warn me this many days before expiry</span><div class="stepper"><button data-d="-1">−</button><input id="s-days" type="number" min="0" max="30" value="${st.leadDays}"><button data-d="1">＋</button></div></label>
@@ -1486,7 +1515,7 @@ function bindSettings() {
   document.querySelectorAll<HTMLElement>('[data-p]').forEach(b => b.onclick = async () => { st.provider = b.dataset.p as any; await save(); render(); });
   $<HTMLInputElement>('#s-key').addEventListener('change', async e => { const v = (e.target as HTMLInputElement).value.trim(); if (st.provider === 'gemini') st.geminiKey = v; else st.openaiKey = v; await save(); toast('Key saved on this phone'); });
   $<HTMLInputElement>('#s-model').addEventListener('change', async e => { const v = (e.target as HTMLInputElement).value.trim(); if (st.provider === 'gemini') st.geminiModel = v; else st.openaiModel = v || 'gpt-4o-mini'; await save(); });
-  $('#s-ai-scan')?.addEventListener('change', async e => { st.useAiScan = (e.target as HTMLInputElement).checked; await save(); toast(st.useAiScan ? 'AI backup for expiry scans is on' : 'Expiry scans stay on your phone'); });
+  $('#s-ai-scan')?.addEventListener('change', async e => { st.useAiScan = (e.target as HTMLInputElement).checked; await save(); toast(st.useAiScan ? 'AI backup for expiry and receipt scans is on' : 'Expiry and receipt scans stay on your phone'); });
   $('#s-test').onclick = async () => {
     const k = $<HTMLInputElement>('#s-key').value.trim(); if (st.provider === 'gemini') st.geminiKey = k; else st.openaiKey = k; await save();
     const done = busy('Testing…');

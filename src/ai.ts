@@ -186,3 +186,20 @@ export async function suggestCategory(s: Settings, name: string, cats: Category[
   const j = await askAI(s, `Which grocery category best fits "${name}"? Choose one id from: ${catList(cats)}. Return JSON only: {"categoryId": string}`);
   return cats.some(c => c.id === j.categoryId) ? j.categoryId : null;
 }
+
+/** One call to categorise several product names. Unknown ids are omitted. */
+export async function suggestCategories(s: Settings, names: string[], cats: Category[]): Promise<Record<string, string>> {
+  const list = [...new Set(names.map(n => n.trim()).filter(Boolean))].slice(0, 12);
+  if (!list.length) return {};
+  const j = await askAI(s, `For each grocery product, pick the best category id from: ${catList(cats)}.
+Products:\n${list.map((n, i) => `${i + 1}. ${n}`).join('\n')}
+Return JSON only: {"items":[{"name":string,"categoryId":string}]}`);
+  const ids = new Set(cats.map(c => c.id));
+  const out: Record<string, string> = {};
+  for (const x of (j.items ?? [])) {
+    const name = String(x?.name ?? '').trim().toLowerCase();
+    const id = String(x?.categoryId ?? '');
+    if (name && ids.has(id)) out[name] = id;
+  }
+  return out;
+}

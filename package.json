@@ -9,7 +9,8 @@
     "preview": "vite preview --host",
     "test:dates": "node --experimental-strip-types scripts/test-dates.ts",
     "test:receipt": "node --experimental-strip-types scripts/test-receipt-date.ts",
-    "test:ocr": "node scripts/test-ocr.mjs"
+    "test:ocr": "node scripts/test-ocr.mjs",
+    "test:receipt-parse": "node --experimental-strip-types scripts/test-receipt-parse.ts"
   },
   "devDependencies": {
     "typescript": "^7.0.2",

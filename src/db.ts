@@ -131,3 +131,17 @@ export function boughtTime(i: { boughtOn?: string; addedAt: number }) {
   if (i.boughtOn && /^\d{4}-\d{2}-\d{2}$/.test(i.boughtOn)) { const [y, m, d] = i.boughtOn.split('-').map(Number); return new Date(y, m - 1, d, 12).getTime(); }
   return i.addedAt;
 }
+
+/** Product-name → category, learned from receipt review corrections. Lives on this device only. */
+export async function getReceiptCats(): Promise<Record<string, string>> {
+  const row = await get<{ key: string; value: Record<string, string> }>('kv', 'receiptCats');
+  return row?.value && typeof row.value === 'object' ? { ...row.value } : {};
+}
+export async function rememberReceiptCat(name: string, categoryId: string) {
+  const key = name.toLowerCase().replace(/[^a-z0-9]+/g, ' ').trim();
+  if (!key || !categoryId) return;
+  const map = await getReceiptCats();
+  if (map[key] === categoryId) return;
+  map[key] = categoryId;
+  await put('kv', { key: 'receiptCats', value: map });
+}

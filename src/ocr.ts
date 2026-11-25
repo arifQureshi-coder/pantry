@@ -64,7 +64,7 @@ async function worker(): Promise<TessWorker> {
         gzip: true,
         workerBlobURL: true,
       });
-      await w.setParameters({ tessedit_char_whitelist: '0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz/.-: ' });
+      await w.setParameters({ tessedit_char_whitelist: '0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz/.-: $@%*,()#&+' });
       return w as unknown as TessWorker;
     })();
     workerP.catch(() => { workerP = null; });
@@ -94,4 +94,17 @@ export async function ocrExpiry(img: Blob): Promise<OcrExpiry> {
   const b = await tryOne(crop);
   if (b.iso) return b;
   return { text: [a.text, b.text].filter(Boolean).join(' '), iso: null, monthOnly: false, raw: a.text || b.text };
+}
+
+/** Full-frame OCR for a receipt photo (no date-box crop). */
+export async function ocrReceiptPhoto(img: Blob): Promise<string> {
+  const pre = await preprocessExpiryPhoto(img, false);
+  return recognize(pre);
+}
+
+/** OCR each receipt part, in order. */
+export async function ocrReceiptPhotos(imgs: Blob[]): Promise<string[]> {
+  const out: string[] = [];
+  for (const img of imgs) out.push(await ocrReceiptPhoto(img));
+  return out;
 }
