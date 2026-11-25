@@ -1,13 +1,28 @@
 Woolworths
 The fresh food people
-Charlestown
-TAX INVOICE
+Woolworths Charlestown
 ABN 88 000 014 675
-MILK 2L                           3.20
-BREAD 700G                        2.80
-CHICKEN BREAST 1KG               14.00
-BANANAS                           4.00
-  0.800 kg @ $5.00/kg
+PH 02 4942 6400
+TAX INVOICE
+Bananas 1kg                       3.50
+Baby Spinach 120g                 3.50
+Avocado Hass                      4.00
+Chicken Breast Fillets 1kg       24.00
+Woolworths Bread 680g             3.20
+Greek Yoghurt 1kg                 6.50
+Cheddar Cheese 250g               6.00
+Milk 2L                           3.20
+Toilet Paper 24pk                24.00
+Dishwashing Liquid 1L             5.00
+Laundry Powder 2kg               22.00
+Frozen Berries 500g              18.00
+Pasta 500g                        2.00
+Chicken Thighs 1kg               22.00
+Lettuce                           3.00
+Apples 1kg                        5.00
+Tuna in Oil 95g                   2.50
+Muesli 750g                      15.59
 12/04/2026 16:10
-SUBTOTAL                        173.00
+SUBTOTAL                        172.99
 TOTAL                           173.00
+EFTPOS                          173.00

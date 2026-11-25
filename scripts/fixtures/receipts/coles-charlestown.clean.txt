@@ -1,11 +1,29 @@
 Coles
-Charlestown
+Coles Charlestown
+ABN 45 004 189 708
+PH 02 4942 5150
 TAX INVOICE
-COLES MLK 2L                     $3.50
-CC BTR 250G                      $5.50
-FLYBUYS POINTS EARNED 40
-FLYBUYS
+Apple Pink Lady 1kg              16.00
+Broccoli                          3.50
+Capsicum kg                       4.00
+Chicken Thighs 1kg               22.00
+Beef Mince 500g                  19.00
+Eggs Free Range 12pk              6.50
+Greek Yoghurt 1kg                16.50
+Pasta 500g                        2.00
+Passata 700g                      3.00
+Milk 2L                           3.20
+Toilet Paper 24pk                24.00
+Laundry Liquid 1L                25.00
+Tissues 200pk                     3.50
+Frozen Vegetables 1kg            14.00
+Cereal 750g                      15.50
+Chips 175g                        3.50
+Chocolate Bar                     2.50
+Sparkling water 10pk             16.20
 12/04/2026 16:40
-SUBTOTAL                        $200.00
+SUBTOTAL                        $199.90
 TOTAL                           $200.00
-MASTERCARD                      $200.00
+EFTPOS                          $200.00
+FLYBUYS POINTS EARNED 100
+FLYBUYS BALANCE 1342

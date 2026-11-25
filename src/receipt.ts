@@ -19,7 +19,7 @@ export interface ReceiptParseResult {
   warning?: string;
 }
 
-const SKIP = /^(sub\s*total|total|amount\s*due|balance\s*due|grand\s*total|gst|tax|vat|includes?\s+gst|taxable|gst\s*payable|payment|tender|cash|change|rounding|round(ed|ing)|points?|rewards?|loyalty|everyday\s*rewards|flybuys|boosters?|savings?|you\s*saved|promotion\s*savings|total\s*savings|discount\s*total|visa|mastercard|amex|american\s*express|eftpos|debit|credit|card|contactless|tap\s*(and|&)\s*go|authori[sz]ation|approval|mid\b|tid\b|abn|acn|phone|tel\b|www\.|http|thank\s*you|thanks\s*for|welcome|tax\s*invoice|invoice|receipt|docket|cashier|operator|served\s*by|store\s*#|lane\b|register|terminal|copy\s*(only)?$|signature|customer\s*copy|merchant|woohoo|low\s*prices|the\s*fresh\s*food|how\s*was|survey|receipt\s*no|txn|trans(action)?(\s*#| no)|items?\s*sold|item\s*count|surcharge|card\s*sales|\d+\s+items?\b)/i;
+const SKIP = /^(sub\s*total|total|amount\s*due|balance\s*due|grand\s*total|gst|tax|vat|includes?\s+gst|taxable|gst\s*payable|payment|tender|cash|change|rounding|round(ed|ing)|points?|rewards?|loyalty|everyday\s*rewards|flybuys|boosters?|savings?|you\s*saved|promotion\s*savings|total\s*savings|discount\s*total|visa|mastercard|amex|american\s*express|eftpos|debit|credit|card|contactless|tap\s*(and|&)\s*go|authori[sz]ation|approval|mid\b|tid\b|abn|acn|phone|tel\b|www\.|http|thank\s*you|thanks\s*for|welcome|tax\s*invoice|invoice|receipt|docket|cashier|operator|served\s*by|store\s*#|lane\b|register|terminal|copy\s*(only)?$|signature|customer\s*copy|merchant|woohoo|low\s*prices|the\s*fresh\s*food|how\s*was|survey|receipt\s*no|txn|trans(action)?(\s*#| no)|items?\s*sold|item\s*count|surcharge|card\s*sales|commonwealth|goldstar|card\s*no|reference\b|\d+\s+items?\b)/i;
 
 const DISCOUNT = /^(you\s*)?(saved|save|price\s*reduced|reduction|discount|markdown|promo(tion)?)\b|\boffer\b/i;
 const MULTIBUY = /\bany\s+(\d+)\s+for\s+\$?\s*([\dOoSsIl|,]+[.,][\dOoSsIl]{2})/i;
@@ -29,6 +29,8 @@ const QTY_BARE = /^(?:[o0q]ty)\s+(\d+)\s+\$?\s*(\d+[.,]\d{2})\b/i;
 /** Qty 2 @ $7.00 misread as "Oty 28 $7.00" (@ → 8). */
 const QTY_OCR = /^(?:[o0q]ty\s+)?(\d)[84]\s*\$?\s*(\d+[.,]\d{2})\b/i;
 const QTY_X = /^(\d+)\s*x\s*$/i;
+/** Costco "169810 1x 12.99" or "169810 1x" after a name-only line. */
+const CODE_QTY = /^(\d{4,})\s+(\d+)\s*x\s*(?:\$?\s*([\dOoSsIlC|,]+[.,][\dOoSsIl]{2}))?\s*[&N*AB]?\s*$/i;
 const WEIGHT = /^(\d+[.,]\d+)\s*(kg|g)\s*(?:net\s*)?(?:@|at)\s*\$?\s*(\d+[.,]\d{2})\s*(?:\/\s*(kg|g))?\b/i;
 const NOTE = /^(?:\$?\s*[\dOoSsIl|,]+[.,][\dOoSsIl]{2}|(\d+[.,]?\d*)\s*(g|kg|ml|l)|(\d+)\s*x\s*\d+([.,]\d+)?\s*(g|kg|ml|l)?)\s*$/i;
 
@@ -78,11 +80,11 @@ const STORE_LABEL: Record<StoreId, string> = {
 };
 
 export function detectStore(text: string): StoreId {
-  const head = text.slice(0, 800).toLowerCase();
-  if (/\bcostco\b|\bkirkland\s+signature\b/.test(head)) return 'costco';
+  const head = text.slice(0, 900).toLowerCase();
+  if (/\bc[o0]stco\b|\bkirkland\s+signature\b|\bwholesale\s+australia\b|\bmarsden\s+park\b/.test(head)) return 'costco';
   if (/woolworths?|\bwoolies\b|\beveryday\s*rewards\b|\bthe\s*fresh\s*food\b/.test(head)) return 'woolworths';
   if (/\bcoles\b|\bflybuys\b/.test(head)) return 'coles';
-  if (/\baldi\b/.test(head)) return 'aldi';
+  if (/\baldi\b|\balde\s+stores\b|\blimited\s+partnership\b/.test(head)) return 'aldi';
   return 'generic';
 }
 
@@ -91,6 +93,7 @@ export function parseMoneyOcr(raw: string): number | undefined {
   let t = String(raw).trim().replace(/[$\s]/g, '');
   const neg = t.startsWith('-');
   if (neg) t = t.slice(1);
+  t = t.replace(/^[Cc](?=[\dOoSsIl])/, '6');
   t = t.replace(/[Oo]/g, '0').replace(/[Ss]/g, '5').replace(/[Il|]/g, '1');
   // 1,234.56 thousands, or 3,20 meaning 3.20 (OCR comma for a dot)
   if (/^\d{1,3}(?:,\d{3})+(?:\.\d{2})$/.test(t)) t = t.replace(/,/g, '');
@@ -176,19 +179,20 @@ function isHeader(line: string) {
   if (!t || t === '$') return true;
   const priced = moneyOf(t) != null && !/\b(pos|trans|abn|ph:|phone|tel)\b/i.test(t);
   if (priced) return false;
-  return /^(woolworths|coles|aldi|costco|the\s*fresh\s*food people)\b/i.test(t)
+  return /^(woolworths|coles|aldi|alde\s+stores|costco|the\s*fresh\s*food people)\b/i.test(t)
     || /\b(ph:|phone\b|tel\b|abn\b|acn\b|tax\s*invoice)\b/i.test(t)
     || /\bpos\s+\d+/i.test(t)
     || /\btrans\s+\d+/i.test(t)
     || /\b\d+[a-z]?\s+\w+\s+(street|st|road|rd|ave|avenue|hwy|highway|drive|dr)\b/i.test(t)
-    || /^(warehouse|marsden\s+park|charlestown|merrylands)\b/i.test(t);
+    || /^(warehouse|marsden\s+park|charlestown|merrylands|lansford)\b/i.test(t)
+    || /\bgoldstar\b|\blimited\s+partnership\b|\bwholesale\b/i.test(t);
 }
 
-const MONEY_AT_END = /\$?\s*(-?[\dOoSsIl|,]+[.,][\dOoSsIl]{2})\s*[&N*AB]?\s*[A-Za-z]{0,3}\s*$/;
+const MONEY_AT_END = /\$?\s*(-?[CGc]?[\dOoSsIl|,]+[.,][\dOoSsIl]{2})\s*[&N*AB]?\s*[A-Za-z0-9]{0,3}\s*$/;
 
 function priceAtEnd(line: string): { name: string; price: number } | null {
   // Name, then a price at the end, optional GST flag (N, *, A, B) or Costco '&'.
-  const m = line.match(/^(.*?)\s+\$?\s*(-?[\dOoSsIl|,]+[.,][\dOoSsIl]{2})\s*[&N*AB]?\s*[A-Za-z]{0,3}\s*$/);
+  const m = line.match(/^(.*?)\s+\$?\s*(-?[CGc]?[\dOoSsIl|,]+[.,][\dOoSsIl]{2})\s*[&N*AB]?\s*[A-Za-z0-9]{0,3}\s*$/);
   if (!m) return null;
   const price = parseMoneyOcr(m[2]);
   if (price == null) return null;
@@ -201,7 +205,7 @@ function priceAtEnd(line: string): { name: string; price: number } | null {
 }
 
 function onlyPrice(line: string): number | undefined {
-  const m = line.match(/^\$?\s*(-?[\dOoSsIl|,]+[.,][\dOoSsIl]{2})\s*[&N*AB]?\s*[A-Za-z]{0,3}\s*$/);
+  const m = line.match(/^\$?\s*(-?[CGc]?[\dOoSsIl|,]+[.,][\dOoSsIl]{2})\s*[&N*AB]?\s*[A-Za-z0-9]{0,3}\s*$/);
   return m ? parseMoneyOcr(m[1]) : undefined;
 }
 
@@ -210,12 +214,14 @@ function moneyOf(line: string): number | undefined {
   return m ? parseMoneyOcr(m[1]) : undefined;
 }
 
-function captureTotal(line: string, into: { sub?: number; total?: number }) {
+function captureTotal(line: string, into: { sub?: number; total?: number; pay?: number }) {
   const t = line.replace(/^[*\-•]+\s*/, '');
-  const amt = moneyOf(t);
+  const loose = t.match(/(-?\d+[.,]\d{1,2})\s*$/);
+  const amt = moneyOf(t) ?? (loose ? parseMoneyOcr(loose[1]) : undefined);
   if (amt == null || amt < 0) return false;
   if (/^(?:\d+\s+)?sub\s*totals?\b/i.test(t)) { into.sub = amt; return true; }
-  const looksTotal = /^(?:\d+\s+)?(grand\s*)?total\b|^amount\s*due\b|^balance\s*due\b/i.test(t);
+  if (/^(card\s*sales|eftpos)\b/i.test(t)) { into.pay = amt; return true; }
+  const looksTotal = /^(?:[A-Za-z0-9]{1,4}\s+)?(?:\d+\s+)?(grand\s*)?total\b|^amount\s*due\b|^balance\s*due\b/i.test(t);
   if (!looksTotal) return false;
   // Allow "Total (INCL GST)" but not TOTAL SAVINGS / TOTAL SURCHARGE / TOTAL GST.
   if (/\b(savings|discount|surcharge|points|items)\b/i.test(t)) return false;
@@ -320,15 +326,23 @@ function resolveQty(n: number, unit: number | undefined, printed: number | undef
 }
 
 
-function pickPrintedTotal(totals: { sub?: number; total?: number }, sum: number): number | null {
-  const t = totals.total, s = totals.sub;
+function closeAmt(a: number, b: number) {
+  return Math.abs(a - b) <= Math.max(1, Math.round(Math.max(a, b) * 0.02 * 100) / 100);
+}
+
+function pickPrintedTotal(totals: { sub?: number; total?: number; pay?: number }, sum: number): number | null {
+  const t = totals.total, s = totals.sub, p = totals.pay;
+  // Card Sales / EFTPOS that agrees with SUBTOTAL (or a small surcharge) beats a garbled TOTAL like $53.48 vs $63.17.
+  if (p != null && s != null && closeAmt(p, s)) return p;
+  if (p != null && t != null && s != null && !closeAmt(t, s) && (closeAmt(p, s) || (sum > 0 && Math.abs(sum - p) < Math.abs(sum - t)))) return p;
+  if (p != null && t == null && s != null && p >= s - 0.02 && p - s <= Math.max(1, s * 0.05)) return p;
   if (t != null && s != null) {
-    const far = Math.abs(t - s) > Math.max(1, Math.round(Math.max(t, s) * 0.02 * 100) / 100);
+    const far = !closeAmt(t, s);
     if (far) {
       const lo = Math.min(t, s), hi = Math.max(t, s);
       // A garbled TOTAL like "5.45" next to SUBTOTAL $85.95 — keep the larger amount.
       if (lo < hi * 0.2) {
-        if (sum > 0 && Math.abs(sum - lo) <= Math.max(1, Math.round(lo * 0.02 * 100) / 100)) return lo;
+        if (sum > 0 && closeAmt(sum, lo)) return lo;
         return hi;
       }
       if (sum > 0) return Math.abs(sum - t) <= Math.abs(sum - s) ? t : s;
@@ -336,7 +350,7 @@ function pickPrintedTotal(totals: { sub?: number; total?: number }, sum: number)
     }
     return t;
   }
-  return t ?? s ?? null;
+  return t ?? s ?? p ?? null;
 }
 
 export function parseReceiptText(text: string, cats: Category[] = [], learned: Record<string, string> = {}, today = new Date()): ReceiptParseResult {
@@ -345,7 +359,7 @@ export function parseReceiptText(text: string, cats: Category[] = [], learned: R
   const items: ReceiptLine[] = [];
   let pending = '';
   let pendingQty: number | null = null;
-  const totals: { sub?: number; total?: number } = {};
+  const totals: { sub?: number; total?: number; pay?: number } = {};
   let pastTotal = false;
 
   const push = (name: string, price: number, quantity = 1) => {
@@ -401,6 +415,19 @@ export function parseReceiptText(text: string, cats: Category[] = [], learned: R
       else pendingQty = n;
       continue;
     }
+    const codeQty = raw.match(CODE_QTY);
+    if (codeQty) {
+      const n = Math.max(1, Math.round(+codeQty[2] || 1));
+      const unit = codeQty[3] ? parseMoneyOcr(codeQty[3]) : undefined;
+      if (pending && unit != null) {
+        push(pending, unit, n);
+        pending = '';
+        pendingQty = null;
+        continue;
+      }
+      pendingQty = n;
+      continue;
+    }
     const wt = raw.match(WEIGHT);
     if (wt && last()) {
       const w = parseMoneyOcr(wt[1].replace(',', '.')) ?? Number(wt[1].replace(',', '.'));
@@ -439,7 +466,9 @@ export function parseReceiptText(text: string, cats: Category[] = [], learned: R
     if (priced && priced.price >= 0) {
       const q = pendingQty ?? 1;
       pendingQty = null;
-      push([pending, priced.name].filter(Boolean).join(' '), priced.price, q);
+      // A new SKU line is a new item — don't glue a previous name-only line onto it.
+      const name = /^\d{5,}/.test(raw) ? priced.name : [pending, priced.name].filter(Boolean).join(' ');
+      push(name, priced.price, q);
       pending = '';
       continue;
     }

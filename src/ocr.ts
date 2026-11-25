@@ -90,25 +90,29 @@ function brightBBox(pix: ImageData, w: number, h: number) {
   return { x: x0, y: y0, w: x1 - x0 + 1, h: y1 - y0 + 1 };
 }
 
-/** Dark vertical gutter between two side-by-side receipts, if both sides look like paper. */
+/** Dark vertical gutter between two side-by-side receipts (including a tall photo of two slips). */
 function splitX(pix: ImageData, box: { x: number; y: number; w: number; h: number }): number | null {
-  if (box.w < 200 || box.w / box.h < 0.85) return null;
-  const { data, width } = pix;
+  if (box.w < 160) return null;
+  const { data, width, height } = pix;
+  // Use the lower/middle band — sky above two receipts is uniformly bright and hides the gutter.
+  const y0 = box.y + Math.round(box.h * 0.28);
+  const y1 = box.y + Math.round(box.h * 0.95);
+  if (y1 - y0 < 40) return null;
   const col = new Float32Array(box.w);
-  const step = Math.max(1, Math.floor(box.h / 120));
+  const step = Math.max(1, Math.floor((y1 - y0) / 100));
   for (let i = 0; i < box.w; i++) {
     let s = 0, n = 0;
     const x = box.x + i;
-    for (let y = box.y; y < box.y + box.h; y += step) {
+    for (let y = y0; y < y1; y += step) {
       s += lumaAt(data, (y * width + x) * 4);
       n++;
     }
-    col[i] = s / n;
+    col[i] = s / Math.max(1, n);
   }
   const mid0 = Math.round(box.w * 0.28);
   const mid1 = Math.round(box.w * 0.72);
   let best = -1, bestVal = 255;
-  const win = Math.max(3, Math.round(box.w * 0.02));
+  const win = Math.max(2, Math.round(box.w * 0.02));
   for (let i = mid0; i < mid1; i++) {
     let s = 0;
     for (let k = -win; k <= win; k++) s += col[i + k] ?? col[i];
@@ -117,11 +121,54 @@ function splitX(pix: ImageData, box: { x: number; y: number; w: number; h: numbe
   }
   const left = average(col, 0, best - win);
   const right = average(col, best + win, box.w);
-  // Gutter must be clearly darker than both receipt sides, and both sides reasonably bright.
-  if (best < 0 || bestVal > 110 || left < 140 || right < 140) return null;
-  if (bestVal > left * 0.72 || bestVal > right * 0.72) return null;
-  if (best < box.w * 0.28 || best > box.w * 0.72) return null;
+  if (best < 0 || left < 140 || right < 140) return null;
+  if (bestVal > 130 && bestVal > Math.min(left, right) * 0.78) return null;
+  if (bestVal > left * 0.85 || bestVal > right * 0.85) return null;
+  const minSide = Math.min(best, box.w - best);
+  if (minSide < 70) return null;
   return box.x + best;
+}
+
+/** Small-angle deskew: pick the rotation with the sharpest horizontal text lines. */
+function deskewAngle(pix: ImageData, box: { x: number; y: number; w: number; h: number }): number {
+  const src = document.createElement('canvas');
+  const scale = Math.min(1, 220 / Math.max(box.w, box.h));
+  src.width = Math.max(8, Math.round(box.w * scale));
+  src.height = Math.max(8, Math.round(box.h * scale));
+  const sg = src.getContext('2d')!;
+  const tmp = document.createElement('canvas');
+  tmp.width = pix.width; tmp.height = pix.height;
+  tmp.getContext('2d')!.putImageData(pix, 0, 0);
+  sg.drawImage(tmp, box.x, box.y, box.w, box.h, 0, 0, src.width, src.height);
+  const score = (ang: number) => {
+    const c = document.createElement('canvas');
+    const rad = ang * Math.PI / 180;
+    const cos = Math.abs(Math.cos(rad)), sin = Math.abs(Math.sin(rad));
+    c.width = Math.max(8, Math.ceil(src.width * cos + src.height * sin));
+    c.height = Math.max(8, Math.ceil(src.width * sin + src.height * cos));
+    const g = c.getContext('2d')!;
+    g.fillStyle = '#fff'; g.fillRect(0, 0, c.width, c.height);
+    g.translate(c.width / 2, c.height / 2);
+    g.rotate(rad);
+    g.drawImage(src, -src.width / 2, -src.height / 2);
+    const a = g.getImageData(0, 0, c.width, c.height).data;
+    const rows = new Float32Array(c.height);
+    for (let y = 0; y < c.height; y++) {
+      let s = 0;
+      for (let x = 0; x < c.width; x++) s += a[(y * c.width + x) * 4] < 140 ? 1 : 0;
+      rows[y] = s;
+    }
+    const mean = average(rows, 0, rows.length);
+    let v = 0;
+    for (let i = 0; i < rows.length; i++) { const d = rows[i] - mean; v += d * d; }
+    return v / rows.length;
+  };
+  let best = 0, bestS = score(0);
+  for (const ang of [-12, -8, -4, 4, 8, 12]) {
+    const sc = score(ang);
+    if (sc > bestS * 1.08) { bestS = sc; best = ang; }
+  }
+  return best;
 }
 
 function average(col: Float32Array, a: number, b: number) {
@@ -133,7 +180,7 @@ function average(col: Float32Array, a: number, b: number) {
   return s / (hi - lo);
 }
 
-/** Crop to the receipt paper, optionally split two side-by-side receipts, then contrast-stretch and upscale. */
+/** Crop to the receipt paper, optionally split two side-by-side receipts, deskew, then contrast-stretch and upscale. */
 export async function preprocessReceiptPhoto(img: Blob): Promise<Blob[]> {
   const bmp = await loadBitmap(img);
   const { w, h } = sizeOf(bmp);
@@ -149,17 +196,34 @@ export async function preprocessReceiptPhoto(img: Blob): Promise<Blob[]> {
     : [
         { x: box.x, y: box.y, w: cut - box.x, h: box.h },
         { x: cut, y: box.y, w: box.x + box.w - cut, h: box.h },
-      ].filter(r => r.w >= 80 && r.h >= 80);
+      ].filter(r => r.w >= 70 && r.h >= 70);
   const out: Blob[] = [];
   for (const r of regions) {
+    const ang = deskewAngle(pix, r);
     const scale = Math.min(4, Math.max(1, 1800 / Math.max(r.w, r.h)));
-    const c = document.createElement('canvas');
-    c.width = Math.round(r.w * scale); c.height = Math.round(r.h * scale);
-    const g = c.getContext('2d')!;
-    g.imageSmoothingEnabled = true;
-    g.drawImage(bmp as CanvasImageSource, r.x, r.y, r.w, r.h, 0, 0, c.width, c.height);
-    contrastStretch(g, c.width, c.height);
-    out.push(await toBlob(c));
+    const dw = Math.round(r.w * scale), dh = Math.round(r.h * scale);
+    const src = document.createElement('canvas');
+    src.width = dw; src.height = dh;
+    const sg = src.getContext('2d')!;
+    sg.imageSmoothingEnabled = true;
+    sg.drawImage(bmp as CanvasImageSource, r.x, r.y, r.w, r.h, 0, 0, dw, dh);
+    let dst = src;
+    if (ang !== 0) {
+      const rad = ang * Math.PI / 180;
+      const cos = Math.abs(Math.cos(rad)), sin = Math.abs(Math.sin(rad));
+      const c = document.createElement('canvas');
+      c.width = Math.ceil(dw * cos + dh * sin);
+      c.height = Math.ceil(dw * sin + dh * cos);
+      const g = c.getContext('2d')!;
+      g.fillStyle = '#fff'; g.fillRect(0, 0, c.width, c.height);
+      g.translate(c.width / 2, c.height / 2);
+      g.rotate(rad);
+      g.imageSmoothingEnabled = true;
+      g.drawImage(src, -dw / 2, -dh / 2);
+      dst = c;
+    }
+    contrastStretch(dst.getContext('2d')!, dst.width, dst.height);
+    out.push(await toBlob(dst));
   }
   return out.length ? out : [await preprocessExpiryPhoto(img, false)];
 }

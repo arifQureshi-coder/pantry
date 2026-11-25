@@ -1,17 +1,31 @@
-COSTCO
-MARSDEN PARK
-WAREHOUSE
-1441234
+Costco Wholesale
+10 Lansford Dr Marsden Park NSW 2765
+(02) 9854 3700
+ABN 57 104 012 893
+TAX INVOICE
+CH Goldstar 79257702200
 KALAMATA OLIVES
-1x
-12.99 &
-1445678
+169810 1x                        12.99 &
 ROTISSERIE CHICKEN
-1x
-8.99 &
-1449999
+348497 1x                        12.99 &
+GARLIC BAGUETTE
+318321 1x                         7.99 &
 KS TAKE & BAKE CHK
-2x
-15.98 &
-EFTPOS
-APPROVED
+337367 1x                         7.99 &
+TNB 5 CHEESE PIZZA
+186441 1x                        14.99 &
+CHICKEN BREAST
+192527 1x                        14.99 &
+CHICKEN THIGHS TP
+175252 1x                        21.18 &
+SNACKING PEAR 2KG
+180043 1x                        23.70 &
+MUTTI PASSATA 700G
+112279 1x                         6.99 &
+122797 1x                        19.99 &
+COMMONWEALTH BANK EFTPOS
+109 Marsden Park
+TERMINAL
+REFERENCE 26339608
+CUSTOMER COPY
+CARD NO. XXXX

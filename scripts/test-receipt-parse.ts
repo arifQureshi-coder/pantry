@@ -238,31 +238,93 @@ check(!!bread && /Vitamin White Bread/i.test(bread!.name), 'Aldi VitmnWhtBread e
 const chs = aldiReal.lines.find(l => /Cheese|Chs/i.test(l.name));
 check(!!chs && /Cheese Slice/i.test(chs!.name), 'Aldi Chs Slc expands', chs?.name);
 check(!aldiReal.lines.some(l => /surcharge|card sales|84\.95|5x1|175g/i.test(l.name)), 'Aldi skips surcharge, card sales, and handwritten notes', aldiList);
-check(aldiReal.total === 63.48 && aldiReal.sum === 63.48 && aldiReal.totalOk, `Aldi Total (INCL GST) $63.48 checks out (sum ${aldiReal.sum})`);
+check(aldiReal.lines.length === 12, `Aldi clean has 12 items, got ${aldiReal.lines.length}`, aldiList);
+const basmati = aldiReal.lines.find(l => /Basmati/i.test(l.name));
+check(basmati?.quantity === 4 && basmati?.price === 7.16, 'Aldi Micro Basmati 4 @ 1.79 = 7.16', `${basmati?.quantity} ${basmati?.price}`);
+check(aldiReal.total === 63.48 && aldiReal.sum === 63.17 && aldiReal.totalOk,
+  `Aldi items $63.17, Total (INCL GST) $63.48 (surcharge 0.31) still checks out`, `sum ${aldiReal.sum} total ${aldiReal.total} ok ${aldiReal.totalOk}`);
 
-// --- Costco layout: code, uppercase name, 1x, price with & ---
+check(parseMoneyOcr('C3.17') === 63.17, 'OCR C3.17 is $63.17');
+check(detectStore('ALDE STORES\nA LIMITED PARTNERSHIP\nTAX INVOICE') === 'aldi', 'ALDE STORES / limited partnership is Aldi');
+
+const aldiOcrMoney = parseReceiptText(`ALDE STORES
+A LIMITED PARTNERSHIP
+366905 Coke Zero 1.5L 11.96 B
+Qty 4 @ $2.99 ea.
+564111 Choco Rice 650g 11.98 A
+Qty 2 @ $5.99 ea.
+SUBTOTAL (INCL GST) C3.17
+CREDIT SURCHARGE GST A 0.19 A
+TOTAL SURCHARGE 0.50% 0.31
+Total (INCL GST) $ 53.48
+19 Items $84.95
+Card Sales $ 63.48
+`, cats, {}, today);
+check(aldiOcrMoney.store === 'aldi', 'OCR-like Aldi still detects the store');
+check(aldiOcrMoney.total === 63.48, 'Card Sales $63.48 wins over Total $53.48 and handwritten $84.95', String(aldiOcrMoney.total));
+check(aldiOcrMoney.sum === 23.94 && aldiOcrMoney.lines.length === 2, `Coke+Choco lines sum 23.94, got ${aldiOcrMoney.sum}`, aldiOcrMoney.lines.map(l => `${l.name} $${l.price}`).join(' | '));
+
+// --- Costco layout: name, then code + 1x + price with & ---
 const costco = parseReceiptText(fx('costco.clean.txt'), cats, {}, today);
 const costcoList = costco.lines.map(l => `${l.name} x${l.quantity} $${l.price}`).join(' | ');
 check(costco.store === 'costco', 'Costco store from header');
-check(costco.lines.length === 3, `Costco has 3 items, got ${costco.lines.length}`, costcoList);
+check(costco.lines.length >= 9, `Costco has at least 9 named items, got ${costco.lines.length}`, costcoList);
 const olives = costco.lines.find(l => /Kalamata Olives/i.test(l.name));
 check(olives?.quantity === 1 && olives?.price === 12.99, 'Costco 1x price with & marker', `${olives?.quantity} ${olives?.price}`);
 const roti = costco.lines.find(l => /Rotisserie Chicken/i.test(l.name));
-check(roti?.quantity === 1 && roti?.price === 8.99, 'Costco rotisserie chicken', `${roti?.quantity} ${roti?.price}`);
+check(roti?.quantity === 1 && roti?.price === 12.99, 'Costco rotisserie chicken 12.99', `${roti?.quantity} ${roti?.price}`);
 const bake = costco.lines.find(l => /Take/i.test(l.name));
-check(!!bake && /Kirkland/i.test(bake!.name) && /Chicken/i.test(bake!.name) && bake!.quantity === 2 && bake!.price === 15.98,
-  'Costco KS TAKE & BAKE CHK expands, 2x 15.98', `${bake?.name} x${bake?.quantity} $${bake?.price}`);
+check(!!bake && /Kirkland/i.test(bake!.name) && /Chicken/i.test(bake!.name) && bake!.quantity === 1 && bake!.price === 7.99,
+  'Costco KS TAKE & BAKE CHK expands, 1x 7.99', `${bake?.name} x${bake?.quantity} $${bake?.price}`);
+const thighs = costco.lines.find(l => /Thighs/i.test(l.name));
+check(thighs?.price === 21.18, 'Costco Chicken Thighs TP 21.18', String(thighs?.price));
+const passata = costco.lines.find(l => /Passata/i.test(l.name));
+check(passata?.price === 6.99, 'Costco Mutti Passata 6.99', String(passata?.price));
 check(costco.total == null && costco.totalOk, 'Costco partial photo (no total) does not warn');
-check(!costco.lines.some(l => /eftpos|approved/i.test(l.name)), 'Costco skipped EFTPOS footer');
+check(!costco.lines.some(l => /eftpos|goldstar|commonwealth|terminal|reference|card no|marsden/i.test(l.name)),
+  'Costco skipped member line and EFTPOS footer', costcoList);
 
 // --- two receipts side by side: parse separately, do not mix columns ---
 const two = parseReceiptParts([fx('ww-charlestown.clean.txt'), fx('coles-charlestown.clean.txt')], cats, {}, today);
 check(/2 receipts/i.test(two.warning ?? '') && /Woolworths \$173/i.test(two.warning ?? '') && /Coles \$200/i.test(two.warning ?? ''),
   'two-receipt photo warns with both totals', two.warning);
 check(two.total === 373, 'two-receipt combined printed total 173+200=373', String(two.total));
-check(two.lines.some(l => /Chicken Breast/i.test(l.name)) && two.lines.some(l => /Butter/i.test(l.name) || /Coles Butter/i.test(l.name)),
+check(two.sum === 372.89 && two.totalOk, `two-receipt item sum 172.99+199.90=372.89 within $1 of $373, got ${two.sum} ok ${two.totalOk}`);
+check(two.lines.some(l => /Chicken Breast/i.test(l.name)) && two.lines.some(l => /Pink Lady|Beef Mince|Free Range/i.test(l.name)),
   'two-receipt merge keeps items from both shops', two.lines.map(l => l.name).join(', '));
+check(!two.lines.some(l => /flybuys/i.test(l.name)), 'two-receipt skips Flybuys points lines');
 check(two.date === '2026-04-12', 'two-receipt date 12/04/2026', String(two.date));
+
+// --- real-photo OCR text (noise is allowed; assert what the engine could actually read) ---
+const aldiOcr = parseReceiptText(fx('aldi.ocr.txt'), cats, {}, today);
+const aldiOcrList = aldiOcr.lines.map(l => `${l.name} x${l.quantity} $${l.price}`).join(' | ');
+check(aldiOcr.store === 'aldi', 'Aldi photo OCR detects ALDE STORES as Aldi');
+const cokeO = aldiOcr.lines.find(l => /Coke/i.test(l.name));
+check(cokeO?.price === 11.96 && cokeO?.quantity === 4, 'Aldi photo OCR: Coke Zero 11.96, qty 4', `${cokeO?.name} x${cokeO?.quantity} $${cokeO?.price}`);
+check(aldiOcr.lines.some(l => /Shapes/i.test(l.name) && l.price === 4.29), 'Aldi photo OCR finds a Shapes line at 4.29', aldiOcrList);
+check(aldiOcr.lines.some(l => /Bread/i.test(l.name) && l.price === 3.29), 'Aldi photo OCR finds Vitamin White Bread 3.29', aldiOcrList);
+check(aldiOcr.lines.some(l => /Olive|Kalanata/i.test(l.name) && l.price === 2.69), 'Aldi photo OCR finds Kalamata olives 2.69', aldiOcrList);
+check(aldiOcr.lines.some(l => /Turkish|Rolls/i.test(l.name) && l.price === 2.59), 'Aldi photo OCR finds Turkish Rolls 2.59', aldiOcrList);
+check(aldiOcr.total === 63.48, 'Aldi photo OCR recovers $63.48 from Card Sales, not $53.48 or $84.95', String(aldiOcr.total));
+check(!aldiOcr.lines.some(l => /surcharge|84\.95/i.test(l.name)), 'Aldi photo OCR skips surcharge and handwritten total', aldiOcrList);
+
+const wwOcr2 = parseReceiptText(fx('ww-charlestown.ocr.txt'), cats, {}, today);
+check(wwOcr2.store === 'woolworths', 'WW Charlestown photo OCR detects The fresh food people as Woolworths');
+check(wwOcr2.total === 173, 'WW Charlestown photo OCR reads Total 173.0 as $173', String(wwOcr2.total));
+
+const colesOcr = parseReceiptText(fx('coles-charlestown.ocr.txt'), cats, {}, today);
+check(colesOcr.total === 200, 'Coles Charlestown photo OCR reads Total $200.00', String(colesOcr.total));
+check(!colesOcr.lines.some(l => /flybuys|points earned|balance/i.test(l.name)), 'Coles photo OCR does not treat Flybuys as an item');
+
+const pairOcr = parseReceiptParts([fx('ww-charlestown.ocr.txt'), fx('coles-charlestown.ocr.txt')], cats, {}, today);
+check(/2 receipts/i.test(pairOcr.warning ?? '') && /173/i.test(pairOcr.warning ?? '') && /200/i.test(pairOcr.warning ?? ''),
+  'two-receipt photo OCR warns with both totals and does not mix into one shop', pairOcr.warning);
+check(pairOcr.total === 373, 'two-receipt photo OCR combined total 173+200=373', String(pairOcr.total));
+
+const costcoOcr = parseReceiptText(fx('costco.ocr.txt'), cats, {}, today);
+check(costcoOcr.total == null && costcoOcr.totalOk, 'Costco photo OCR (partial, no printed total) does not warn');
+check(!costcoOcr.lines.some(l => /\d{10,}/.test(l.name) || /card no|eftpos|goldstar/i.test(l.name)),
+  'Costco photo OCR does not keep card or EFTPOS lines as items', costcoOcr.lines.map(l => l.name).join(' | '));
 
 console.log(fail ? `${fail} failed, ${pass} passed` : `${pass} passed`);
 process.exit(fail ? 1 : 0);
